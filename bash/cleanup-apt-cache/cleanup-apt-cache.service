@@ -1,0 +1,9 @@
+[Unit]
+Description=Clean APT Package Cache
+
+[Service]
+Type=oneshot
+StandardOutput=journal
+StandardError=journal
+RemainAfterExit=yes
+ExecStart=/opt/script/cleanup-apt-cache

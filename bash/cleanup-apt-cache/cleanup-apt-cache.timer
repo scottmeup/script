@@ -1,0 +1,9 @@
+[Unit]
+Description=Timer to clear APT package cache
+
+[Timer]
+OnBootSec=1hour
+OnUnitActiveSec=1day
+
+[Install]
+WantedBy=timers.target

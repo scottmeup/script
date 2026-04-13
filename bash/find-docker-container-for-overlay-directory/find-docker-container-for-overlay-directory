@@ -1,0 +1,6 @@
+#set -x
+
+DIRNAME="/var/lib/docker/overlay2/c8a0e256ec1d69f39aa3ef1a43d192e323092acec0981d97577a2e25f9f48b1c" #DIRNAME should be the overlay folder you want the container name of 
+for CONTAINER in $(docker ps -qa);
+    do docker inspect $CONTAINER | grep -q $DIRNAME && docker ps -a | grep $CONTAINER;
+done

@@ -1,0 +1,9 @@
+[Unit]
+Description=Trim systemd journal
+
+[Service]
+Type=oneshot
+StandardOutput=journal
+StandardError=journal
+RemainAfterExit=yes
+ExecStart=/bin/bash /opt/script/cleanup-journal.service

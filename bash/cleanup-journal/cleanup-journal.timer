@@ -1,0 +1,9 @@
+[Unit]
+Description=Timer to trim systemd journal
+
+[Timer]
+OnBootSec=1hour
+OnUnitActiveSec=1hour
+
+[Install]
+WantedBy=timers.target

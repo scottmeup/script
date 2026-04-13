@@ -1,0 +1,10 @@
+[Unit]
+Description=Timer to prune docker images
+
+
+[Timer]
+OnBootSec=1day
+OnUnitActiveSec=1day
+
+[Install]
+WantedBy=timers.target

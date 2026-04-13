@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+
+set -eEuo pipefail
+
+MARKER_FILE_NAME="${DOCKER_PRUNER_MARKER:-DOCKER-PRUNER-MARKER-FILE}"
+DOCKER_PATH="${DOCKER_PATH:-/var/lib/docker/overlay2}"
+
+function _used_dirs() {
+    for docker_obj in $(docker ps -aq) $(docker image ls -aq); do
+        lowerdir="$(docker inspect "$docker_obj" | jq '.[].GraphDriver.Data.LowerDir' -r)"
+        for dir in ${lowerdir//:/ }; do
+            dirname "$dir"
+        done
+        dirname "$(docker inspect "$docker_obj" | jq '.[].GraphDriver.Data.MergedDir' -r)"
+    done
+}
+
+function used_dirs() {
+    _used_dirs | sort
+}
+
+function all_dirs() {
+    find "$DOCKER_PATH"/ -maxdepth 1 -type d | grep -Ev '^'"$DOCKER_PATH"'/?l?$' | sort
+}
+
+function unused_dirs() {
+    grep -v -xF -f <(used_dirs) <(all_dirs)
+}
+
+function set_marker() {
+    touch "$1"/merged/"$MARKER_FILE_NAME" 2> /dev/null || \
+        touch "$1"/diff/"$MARKER_FILE_NAME"
+}
+
+function _check() {
+    for container in $(docker ps -aq); do
+        docker exec "$container" ls "/$MARKER_FILE_NAME" && echo "container: $container" || true
+    done
+    for image in $(docker image ls -aq); do
+        docker run --rm -it --entrypoint ls "$image" "/$MARKER_FILE_NAME" && echo "image: $image" || true
+    done
+}
+
+function check() {
+    output="$(_check 2>&1 | grep -Ev /"$MARKER_FILE_NAME'?"': No such file or directory')"
+    if [[ -n "$output" ]]; then
+        echo "Problem detected !"
+        echo "$output"
+        exit 1
+    fi
+}
+
+function usage() {
+    echo -e "Usage:
+    \t$0 list    -- List all directories that needs to be removed
+    \t$0 marker  -- Put a marker on each directory, to check if the marker in found in a running container (detecting an issue with $0)
+    \t$0 check   -- Check if a marker is found. Must have run $0 marker first to make sense
+    \t$0 clear   -- Remove the directories"
+}
+
+if [[ $# == 0 ]]; then
+    usage ; exit 0
+fi
+
+if [ "$EUID" -ne 0 ]
+  then echo "Please run as root"
+  exit 1
+fi
+
+
+if [[ "$1" == "list" ]]; then
+    unused_dirs
+elif [[ "$1" == "marker" ]]; then
+    export -f set_marker
+    export MARKER_FILE_NAME="$MARKER_FILE_NAME"
+    unused_dirs | xargs -I {} bash -c "set_marker {}"
+elif [[ "$1" == "check" ]]; then
+    check
+elif [[ "$1" == "clear" ]]; then
+    unused_dirs | xargs -I {} find {} -delete
+elif [[ "$1" == "fn" ]]; then
+    $2 "$@"
+fi

@@ -1,0 +1,13 @@
+#!/bin/bash
+
+# Remove unused Docker data
+/bin/docker system prune -a -f
+
+# Clear logs for all containers (running and stopped)
+for container_dir in /var/lib/docker/containers/*; do
+  log_path="$container_dir/*-json.log"
+
+  if [[ -f $log_path ]]; then
+    truncate -s 0 "$log_path"
+  fi
+done

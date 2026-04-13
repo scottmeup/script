@@ -1,0 +1,9 @@
+[Unit]
+Description=Prune docker images
+
+[Service]
+Type=oneshot
+StandardOutput=journal
+StandardError=journal
+RemainAfterExit=no
+ExecStart=/bin/bash /opt/script/cleanup-docker

@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+#
+# Monitor internet connectivity and manage a Docker service.
+# - If system uptime < 1 hour: stop the service.
+# - If internet goes down: stop service, start 1-hour cooldown.
+# - If already stopped and no internet: do nothing (don’t reset cooldown).
+# - After cooldown: require 5 successful connectivity checks (across runs) before restarting the service.
+
+#set -x
+
+# --- Configuration ---
+DOCKER_COMPOSE_DIR="/docker-compose/autobrr"
+SERVICE_NAME="autobrr"
+LOCK_FILE="/tmp/${SERVICE_NAME}_cooldown.lock"
+COUNT_FILE="/tmp/${SERVICE_NAME}_success_count.tmp"
+CHECK_HOST="8.8.8.8"
+PING_COUNT=1
+PING_TIMEOUT=1
+COOLDOWN_SECONDS=3600
+SUCCESS_THRESHOLD=5    # How many times the script must be run to consider connectivity restored. Note: not the internal connectivity check - script should be set to run once per minute
+UPTIME_REQUIRED=3600   # 1 hour (in seconds)
+TEST_DURATION=60       # Connectivity test runs for 60 seconds. Note: This should be set to the same length of time as the interval between successive script executions as scheduled with a systemd timer or cron
+TEST_INTERVAL=1        # Pause 1 second between tests
+MAX_FAILURES=2         # Number of failed ping attempts allowed before changing state to down
+
+check_connectivity() {
+    local start_time end_time current_time failures=0 successes=0
+
+    start_time=$(date +%s)
+    end_time=$((start_time + TEST_DURATION))
+
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting connectivity test for ${TEST_DURATION}s (max ${MAX_FAILURES} failures allowed)..."
+
+    while (( $(date +%s) < end_time )); do
+        if ping -c "$PING_COUNT" -W "$PING_TIMEOUT" "$CHECK_HOST" >/dev/null 2>&1; then
+            ((successes++))
+        else
+            ((failures++))
+        fi
+
+        # Early stop if we've exceeded max failures
+        if (( failures > MAX_FAILURES )); then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - Connectivity test failed (${failures} failures, ${successes} successes)."
+            return 1
+        fi
+
+        sleep "$TEST_INTERVAL"
+    done
+
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Connectivity OK (${successes} successes, ${failures} failures)."
+    return 0
+}
+
+stop_service() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Internet down. Stopping $SERVICE_NAME..."
+    (cd "$DOCKER_COMPOSE_DIR" && docker compose stop "$SERVICE_NAME")
+    date +%s > "$LOCK_FILE"
+    echo 0 > "$COUNT_FILE"
+}
+
+#is_service_stopped() {
+#    (cd "$DOCKER_COMPOSE_DIR" && docker compose ps -q "$SERVICE_NAME" | xargs -r docker inspect -f '{{.State.Running}}' 2>/dev/null | grep -q false)
+#}
+
+is_service_stopped() {
+    # Move into compose directory
+    cd "$DOCKER_COMPOSE_DIR" || return 1
+
+    # Check the service status
+    STATUS=$(docker compose ps --services --filter "status=running" | grep -Fx "$SERVICE_NAME" || true)
+
+    # If the service name is *not* in the running list, it's stopped
+    if [[ -z "$STATUS" ]]; then
+        return 0  # stopped
+    else
+        return 1  # running
+    fi
+}
+
+start_service() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Internet stable and uptime sufficient. Starting $SERVICE_NAME..."
+    (cd "$DOCKER_COMPOSE_DIR" && docker compose up -d)
+    rm -f "$LOCK_FILE"
+}
+
+system_uptime_seconds() {
+    awk '{print int($1)}' /proc/uptime
+}
+
+
+#Make sure system has been up long enough
+UPTIME=$(system_uptime_seconds)
+if (( UPTIME < UPTIME_REQUIRED )); then
+    stop_service
+    REMAIN=$(( UPTIME_REQUIRED - UPTIME ))
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - System uptime ${UPTIME}s < required ${UPTIME_REQUIRED}s. Waiting ($REMAIN s remaining)."
+    exit 0
+fi
+
+#Load or initialize counter
+SUCCESS_COUNT=$(cat "$COUNT_FILE" 2>/dev/null || echo 0)
+CURRENT_TIME=$(date +%s)
+
+#Check if currently in cooldown period
+if [[ -f "$LOCK_FILE" ]]; then
+    LAST_STOP_TIME=$(cat "$LOCK_FILE")
+    ELAPSED=$(( CURRENT_TIME - LAST_STOP_TIME ))
+
+    if (( ELAPSED < COOLDOWN_SECONDS )); then
+        REMAINING=$(( COOLDOWN_SECONDS - ELAPSED ))
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Cooldown active ($REMAINING seconds remaining)."
+        exit 0
+    fi
+    # Cooldown expired — continue
+fi
+
+#Check internet connectivity
+if check_connectivity; then
+    SUCCESS_COUNT=$(( SUCCESS_COUNT + 1 ))
+    echo "$SUCCESS_COUNT" > "$COUNT_FILE"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Internet OK ($SUCCESS_COUNT/$SUCCESS_THRESHOLD)."
+
+    if (( SUCCESS_COUNT >= SUCCESS_THRESHOLD  )); then
+        if is_service_stopped; then
+        	start_service
+        fi
+    fi
+else
+    # Case: Internet down
+    if is_service_stopped; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Internet down, service already stopped. Cooldown unchanged."
+        exit 0
+    else
+        stop_service
+    fi
+fi

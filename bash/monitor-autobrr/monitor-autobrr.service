@@ -1,0 +1,17 @@
+[Unit]
+Description=Monitor Internet and manage autobrr Docker service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/script/monitor-autobrr
+# Ensure environment variables are inherited if needed
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+# Optional: set working directory if the script depends on it
+#WorkingDirectory=/opt/script
+# Log output to journald
+#StandardOutput=journal
+#StandardError=journal
+
+User=andrewscott

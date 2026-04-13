@@ -79,17 +79,17 @@ def build_provider_map(clear_status=False):
         counts = {'series': 0, 'season': 0, 'episode': 0, 'movie': 0}
 
         for ser in series_list:
-            # insert series, seasons, episodes, map...
-            # (same logic as before - omitted for brevity, copy from old script)
+        # insert series, seasons, episodes, map...
+        # (same logic as before - omitted for brevity, copy from old script)
 
         # Radarr movies
         # (same as before)
 
-        conn.commit()
-        duration = time.time() - start_time
-        log(f"Provider map built in {duration:.1f}s")
+            conn.commit()
+            duration = time.time() - start_time
+            log(f"Provider map built in {duration:.1f}s")
 
-        save_setting('last_refresh', datetime.now().isoformat())
+            save_setting('last_refresh', datetime.now().isoformat())
     except Exception as e:
         log(f"CRITICAL ERROR in build_provider_map: {e}")
         log(traceback.format_exc())

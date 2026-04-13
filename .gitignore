@@ -10,3 +10,5 @@ python/jellyfin-delete-sync/episode_map.db
 *.patch
 /python/jellyfin-delete-sync/old versions
 python/connectivity-watchdog/mqtt_brokers.conf
+/python/jellyfin-delete-sync/.idea
+/.idea

@@ -44,9 +44,7 @@ if [ "$DELETE_INPUT_FILES" = false ]; then
 fi
 
 # Get current UNIX time
-now=$(date +%s)
-
-# Function to extract timestamp from filename based on pattern
+now=$(date +%s)/
 extract_timestamp_from_filename() {
     local filename=$(basename "$1")
     local name_no_ext="${filename%.*}"
@@ -213,6 +211,8 @@ while IFS= read -r -d '' file; do
     if [ "$filename_timestamp" != "0" ]; then
         files+=("$file")
         file_timestamps+=("$filename_timestamp")
+    elif $DEBUG; then
+        echo "Invalid timestamp in $file"
     fi
 done < <(find "$SOURCE_DIR" -maxdepth 1 -type f -iname "*.mov" -print0)
 
@@ -235,12 +235,14 @@ last_time=0
 
 join_group() {
     if [ "${#group[@]}" -ge 1 ]; then
-        # Debug: show first_time value
-        echo "DEBUG: join_group called with ${#group[@]} files, first_time = $first_time" >> "$DEBUG_LOG"
-        echo "DEBUG: Group files:" >> "$DEBUG_LOG"
-        for f in "${group[@]}"; do
-            echo "  - $f" >> "$DEBUG_LOG"
-        done
+        if $DEBUG; then
+            # Debug: show first_time value
+            echo "DEBUG: join_group called with ${#group[@]} files, first_time = $first_time" >> "$DEBUG_LOG"
+            echo "DEBUG: Group files:" >> "$DEBUG_LOG"
+            for f in "${group[@]}"; do
+                echo "  - $f" >> "$DEBUG_LOG"
+            done
+        fi
         
         # Find the most recent file in the group (highest mtime)
         max_mtime=0

@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+
+#set -x
+
+for n in {1..60}; 
+do
+
+    # Test for network conection
+    for interface in $(ls /sys/class/net/ | grep -v lo);
+    do
+      if [[ $(cat /sys/class/net/$interface/carrier) = 1 ]]; then OnLine=1; fi
+    done
+    if ! [ $OnLine ]; then echo "Not Online" > /dev/stderr; exit 1; fi
+
+    sleep 1
+
+done

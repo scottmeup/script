@@ -113,6 +113,102 @@ function onOpen() {
     .addToUi();
 }
 
+function organizeSheetsByCategory() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheets = ss.getSheets();
+
+  var categories = {
+    IMPORT: {
+      color: '#D9EAD3',
+      names: ['_Import_Log', '_Source_Index', '_Summary', 'Raw_JSON', 'Raw_KeyValue']
+    },
+    DATABASE: {
+      color: '#CFE2F3',
+      names: [
+        'ExerciseCatalog',
+        'ExerciseEquipmentMap',
+        'ExerciseLabels',
+        'ExerciseMaster',
+        'ExerciseDescriptions',
+        'ExerciseTips',
+        'ExerciseSteps',
+        'WorkoutNames',
+        'WorkoutDescriptions',
+        'Units',
+        'WorkoutProperties',
+        'MuscleTypes',
+        'CategoryTypes',
+        'EquipmentTypes'
+      ]
+    },
+    OUTPUT: {
+      color: '#FFF2CC',
+      names: [
+        'Final_Output',
+        'Garmin_Workout_Constructor',
+        'Garmin_Export'
+      ]
+    },
+    HELPER: {
+      color: '#F4CCCC',
+      names: [
+        'Day_Block_Map',
+        'Settings',
+        'Setup',
+        'Day_Overrides',
+        'Sessions',
+        'Validation_Options',
+        'Activity_Library',
+        'URLs',
+        'Cycle_Log_Columns',
+        'Conditional_Formatting',
+        'Log_Display'
+      ]
+    }
+  };
+
+  var orderedSheets = [];
+
+  Object.keys(categories).forEach(function(catKey) {
+    var cat = categories[catKey];
+
+    var matched = sheets.filter(function(s) {
+      return cat.names.indexOf(s.getName()) !== -1;
+    });
+
+    matched.sort(function(a, b) {
+      return a.getName().localeCompare(b.getName());
+    });
+
+    matched.forEach(function(sheet) {
+      sheet.setTabColor(cat.color);
+      orderedSheets.push(sheet);
+    });
+  });
+
+  // Any remaining sheets (not categorized)
+  var remaining = sheets.filter(function(s) {
+    return orderedSheets.indexOf(s) === -1;
+  });
+
+  remaining.sort(function(a, b) {
+    return a.getName().localeCompare(b.getName());
+  });
+
+  remaining.forEach(function(sheet) {
+    sheet.setTabColor(null);
+    orderedSheets.push(sheet);
+  });
+
+  // Reorder in sheet
+  for (var i = 0; i < orderedSheets.length; i++) {
+    ss.setActiveSheet(orderedSheets[i]);
+    ss.moveActiveSheet(i + 1);
+  }
+
+  SpreadsheetApp.getUi().alert('Sheets organized successfully.');
+}
+
 
 function setGarminImportFolderId() {
   const ui = SpreadsheetApp.getUi();

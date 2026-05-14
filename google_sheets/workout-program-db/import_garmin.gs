@@ -393,18 +393,28 @@ function parseKeyValueText_(text) {
 }
 
 function parseExercisesJson_(data, sourceKey, fileName, importState) {
-  Object.keys(data || {}).forEach(categoryKey => {
-    const category = data[categoryKey] || {};
-    const exercises = category.exercises || {};
+  if (!data) return;
 
-    Object.keys(exercises).forEach(exerciseKey => {
-      const ex = exercises[exerciseKey] || {};
+  Object.keys(data).forEach(function(categoryKey) {
+    var category = data[categoryKey] || {};
+
+    var exercises =
+      category.exercises ||
+      category.exerciseList ||
+      category.items ||
+      category.data ||
+      {};
+
+    if (typeof exercises !== 'object') return;
+
+    Object.keys(exercises).forEach(function(exerciseKey) {
+      var ex = exercises[exerciseKey] || {};
 
       importState.parsed.exerciseCatalog.push([
-        categoryKey,
+        categoryKey || '',
         arrToCsv_(category.primaryMuscles),
         arrToCsv_(category.secondaryMuscles),
-        exerciseKey,
+        exerciseKey || '',
         ex.isBodyWeight === true,
         ex.counterpart || '',
         arrToCsv_(ex.primaryMuscles),

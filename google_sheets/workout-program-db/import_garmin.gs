@@ -107,9 +107,12 @@ function onOpen() {
     .addItem('Set Drive Folder ID', 'setGarminImportFolderId')
     .addItem('Import Available Files', 'importGarminWorkoutFiles')
     .addSeparator()
-    .addItem('Show Current Folder ID', 'showGarminImportFolderId')
+    .addItem('Remove Archive Sheets', 'removeArchiveSheets')
+    .addSeparator()
+    .addItem('Organize Sheets', 'organizeSheetsByCategory')
     .addToUi();
 }
+
 
 function setGarminImportFolderId() {
   const ui = SpreadsheetApp.getUi();
@@ -279,6 +282,25 @@ function detectSourceType_(fileName, text) {
   const trimmed = text.trim();
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) return 'JSON';
   return 'KV';
+}
+
+function removeArchiveSheets() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheets = ss.getSheets();
+  var removedCount = 0;
+
+  for (var i = sheets.length - 1; i >= 0; i--) {
+    var name = sheets[i].getName();
+
+    if (name.indexOf('__archive_') !== -1) {
+      ss.deleteSheet(sheets[i]);
+      removedCount++;
+    }
+  }
+
+  SpreadsheetApp.getUi().alert(
+    removedCount + ' archive sheet(s) removed successfully.'
+  );
 }
 
 function importJsonSource_(sourceKey, fileName, text, importState) {

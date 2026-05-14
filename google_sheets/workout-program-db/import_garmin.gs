@@ -510,39 +510,44 @@ function parseKeyValueText_(text) {
   return rows;
 }
 
+
 function parseExercisesJson_(data, sourceKey, fileName, importState) {
   if (!data) return;
 
-  Object.keys(data).forEach(function(categoryKey) {
-    var category = data[categoryKey] || {};
+  var categories = data.categories || {};
 
-    var exercises =
-      category.exercises ||
-      category.exerciseList ||
-      category.items ||
-      category.data ||
-      {};
+  Object.keys(categories).forEach(function(categoryKey) {
+    var category = categories[categoryKey] || {};
 
-    if (typeof exercises !== 'object') return;
+    var exercises = category.exercises || {};
 
     Object.keys(exercises).forEach(function(exerciseKey) {
       var ex = exercises[exerciseKey] || {};
 
+      var primary = ex.primaryMuscles || [];
+      var secondary = ex.secondaryMuscles || [];
+
+      if ((!primary || primary.length === 0) && secondary && secondary.length > 0) {
+        primary = secondary;
+        secondary = [];
+      }
+
       importState.parsed.exerciseCatalog.push([
-        categoryKey || '',
-        arrToCsv_(category.primaryMuscles),
-        arrToCsv_(category.secondaryMuscles),
-        exerciseKey || '',
+        categoryKey,
+        '', // category-level muscles not present here
+        '',
+        exerciseKey,
         ex.isBodyWeight === true,
         ex.counterpart || '',
-        arrToCsv_(ex.primaryMuscles),
-        arrToCsv_(ex.secondaryMuscles),
+        arrToCsv_(primary),
+        arrToCsv_(secondary),
         sourceKey,
         fileName
       ]);
     });
   });
 }
+
 
 function parseExerciseToEquipmentsJson_(data, sourceKey, fileName, importState) {
   if (!Array.isArray(data)) {

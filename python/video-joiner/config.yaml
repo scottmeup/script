@@ -1,9 +1,9 @@
 dry_run: true
 
-output_dir: /mnt/sdc
+output_dir: /mnt/sdc1/temp/joined_cycle_videos/output
 
 grouping:
-  max_gap_seconds: 600
+  max_gap_seconds: 1200
 
 processing:
   rotate: 180

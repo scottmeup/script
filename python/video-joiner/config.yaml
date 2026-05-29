@@ -1,73 +1,53 @@
+paths:
+  processor: ./processor.py
+  ingest_script: ./ingest.py
+
 dry_run: true
 
 output_dir: /mnt/sdc1/temp/joined_cycle_videos/output
 
 grouping:
-  max_gap_seconds: 1200
-
-processing:
-  rotate: 180
+  max_gap_seconds: 600
 
 normalize_inputs:
+  resolution_value: 1280x720
   resolution: match_first
   fps: match_first
 
-unprocessed_detection:
-  enabled: false
-  metric: both
-  threshold_percent: 5
-  apply_to: ungrouped_only
-
-import_event:
-  max_gap_seconds: 30
-
-on_parse_failure: warn
-
-on_sync_failure:
-  mode: fallback_per_camera
-
-sync:
-  mode: offset
-  sync_points:
-    - reference_camera: Front
-      reference_time: 2026-05-16T10:00:00
-      target_camera: Rear
-      target_time: 2026-05-16T09:00:05
+watcher:
+  delay_seconds: 30
+  run_ingest_before_processing: true
+  watch_dirs:
+    - path: /videos/front
+      require_exists: true
+    - path: /mnt/import
+      require_exists: false
+  move:
+    enabled: true
+    dest: /videos/staging
 
 sources:
   - name: Front
     path: /videos/front
-    extensions: [MP4]
     datetime_format: YYYY_MMDD_HHMMSS_nnn
     offset_seconds: 0.0
     drift_seconds_per_hour: 0.0
 
   - name: Rear
     path: /videos/rear
+    datetime_format: YYYY_MMDD_HHMMSS_nnn
     offset_seconds: -1.25
     drift_seconds_per_hour: 0.005
 
+sync:
+  mode: sync_points
+  sync_points:
+    - reference_camera: Front
+      reference_time: 2026-05-16T10:00:00
+      target_camera: Rear
+      target_time: 2026-05-16T09:00:05
+
 output_mode:
-  type: concatenate
-  concatenate:
-    ordering: chronological
-    camera_order: [Front, Rear]
-
-
-ingest:
-  mode: move | in_place
-
-  volumes:
-    - label: FRONT_CAM
-      source_path: /media/FRONT/DCIM
-      dest_path: /videos/front
-      file_pattern: "*.MP4"
-
-    - label: REAR_CAM
-      source_path: /media/REAR/DCIM
-      dest_path: /videos/rear
-      file_pattern: "*.MP4"
-
-  move:
-    overwrite: false
-    remove_source: false
+  type: stack
+  stack:
+    layout: horizontal

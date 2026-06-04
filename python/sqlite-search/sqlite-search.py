@@ -5,16 +5,34 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+def parse_bool(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    value = value.strip().strip('"').strip("'").lower()
+    return value in ("1", "true", "yes", "on")
+
+def parse_list(name, default=""):
+    value = os.getenv(name, default)
+    return [item.strip() for item in value.split(",")] if value else []
+
+def qident(name):
+    return '"' + str(name).replace('"', '""') + '"'
+
 db_path = os.getenv("DB_PATH")
-terms = os.getenv("SEARCH_TERMS").split(",")
-replace_terms = os.getenv("REPLACE_TERMS").split(",")
-case_sensitive = os.getenv("CASE_SENSITIVE", "false").lower() == "true"
+terms = parse_list("SEARCH_TERMS")
+replace_terms = parse_list("REPLACE_TERMS")
+case_sensitive = parse_bool("CASE_SENSITIVE", False)
+search_values = parse_bool("SEARCH_VALUES", True)
+search_columns = parse_bool("SEARCH_COLUMNS", False)
+search_tables = parse_bool("SEARCH_TABLES", False)
+enable_replacement = parse_bool("ENABLE_REPLACEMENT", False)
 
-search_values = os.getenv("SEARCH_VALUES", "true").lower() == "true"
-search_columns = os.getenv("SEARCH_COLUMNS", "false").lower() == "true"
-search_tables = os.getenv("SEARCH_TABLES", "false").lower() == "true"
+if not db_path:
+    raise ValueError("DB_PATH is required")
 
-enable_replacement = os.getenv("ENABLE_REPLACEMENT", "false").lower() == "true"
+if not terms:
+    raise ValueError("SEARCH_TERMS is required")
 
 flags = 0 if case_sensitive else re.IGNORECASE
 
@@ -27,19 +45,20 @@ for term in terms:
 
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
-cursor = conn.cursor()
+read_cursor = conn.cursor()
+write_cursor = conn.cursor()
 
-def normalize(v):
-    if v is None:
+def normalize(value):
+    if value is None:
         return ""
-    return str(v)
+    return str(value)
 
 def find_matches(text):
-    matches = []
+    matched = []
     for i, pattern in enumerate(compiled_patterns):
         if pattern.search(text):
-            matches.append((i, pattern))
-    return matches
+            matched.append(i)
+    return matched
 
 def apply_replacements(text):
     new_text = text
@@ -48,68 +67,123 @@ def apply_replacements(text):
         new_text = pattern.sub(replacement, new_text)
     return new_text
 
-tables = cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+def get_tables():
+    rows = read_cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
+    return [row["name"] for row in rows]
 
-total_matches = 0
+def get_table_info(table_name):
+    return read_cursor.execute(f"PRAGMA table_info({qident(table_name)})").fetchall()
 
-for table in tables:
-    table_name = table["name"]
+def get_pk_columns(table_info):
+    pk_cols = [row["name"] for row in table_info if row["pk"]]
+    pk_cols_sorted = sorted(pk_cols, key=lambda c: next(r["pk"] for r in table_info if r["name"] == c))
+    return pk_cols_sorted
 
+def has_rowid_table(table_name):
+    sql_row = read_cursor.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,)
+    ).fetchone()
+    if not sql_row or sql_row["sql"] is None:
+        return True
+    return "WITHOUT ROWID" not in sql_row["sql"].upper()
+
+table_match_count = 0
+column_match_count = 0
+value_match_count = 0
+rows_updated = 0
+fields_updated = 0
+
+tables = get_tables()
+
+for table_name in tables:
     if search_tables:
-        matches = find_matches(table_name)
-        for idx, _ in matches:
+        table_matches = find_matches(table_name)
+        for idx in table_matches:
             print(f"[TABLE MATCH] table={table_name} term={terms[idx]}")
-            total_matches += 1
+            table_match_count += 1
 
     try:
-        columns_info = cursor.execute(f"PRAGMA table_info('{table_name}')").fetchall()
-        columns = [col["name"] for col in columns_info]
+        table_info = get_table_info(table_name)
+        columns = [row["name"] for row in table_info]
+        pk_columns = get_pk_columns(table_info)
+        rowid_ok = has_rowid_table(table_name)
 
         if search_columns:
             for col in columns:
-                matches = find_matches(col)
-                for idx, _ in matches:
+                column_matches = find_matches(col)
+                for idx in column_matches:
                     print(f"[COLUMN MATCH] table={table_name} column={col} term={terms[idx]}")
-                    total_matches += 1
+                    column_match_count += 1
 
-        if search_values:
-            rows = cursor.execute(f"SELECT rowid, * FROM '{table_name}'")
+        if not search_values:
+            continue
 
-            for row in rows:
-                rowid = row["rowid"] if "rowid" in row.keys() else None
+        select_columns = []
+        if rowid_ok:
+            select_columns.append("rowid AS __copilot_rowid__")
+        select_columns.extend([qident(c) for c in columns])
 
-                updates = {}
+        select_sql = f"SELECT {', '.join(select_columns)} FROM {qident(table_name)}"
+        rows = read_cursor.execute(select_sql).fetchall()
 
-                for col in columns:
-                    value = normalize(row[col])
-                    matches = find_matches(value)
+        for row in rows:
+            updates = {}
+            row_had_value_match = False
 
-                    if matches:
-                        for idx, pattern in matches:
-                            print(f"[VALUE MATCH] table={table_name} column={col} rowid={rowid} term={terms[idx]}")
-                            total_matches += 1
+            for col in columns:
+                original_value = row[col]
+                value_text = normalize(original_value)
+                matches = find_matches(value_text)
 
-                        if enable_replacement:
-                            new_value = apply_replacements(value)
-                            if new_value != value:
-                                updates[col] = new_value
+                if matches:
+                    row_had_value_match = True
+                    for idx in matches:
+                        print(f"[VALUE MATCH] table={table_name} column={col} term={terms[idx]} value={value_text}")
+                        value_match_count += 1
 
-                if enable_replacement and updates:
-                    set_clause = ", ".join([f"{c}=?" for c in updates.keys()])
-                    params = list(updates.values())
+                    if enable_replacement and original_value is not None:
+                        new_value = apply_replacements(value_text)
+                        if new_value != value_text:
+                            updates[col] = new_value
 
-                    if rowid is not None:
-                        cursor.execute(
-                            f"UPDATE '{table_name}' SET {set_clause} WHERE rowid=?",
-                            params + [rowid]
-                        )
+            if enable_replacement and updates:
+                set_clause = ", ".join(f"{qident(col)}=?" for col in updates.keys())
+                params = [updates[col] for col in updates.keys()]
 
-    except Exception:
-        continue
+                if rowid_ok:
+                    where_clause = "__copilot_rowid__ = ?"
+                    where_value = row["__copilot_rowid__"]
+                    update_sql = f"UPDATE {qident(table_name)} SET {set_clause} WHERE rowid = ?"
+                    write_cursor.execute(update_sql, params + [where_value])
+                    if write_cursor.rowcount > 0:
+                        rows_updated += 1
+                        fields_updated += len(updates)
+                elif pk_columns:
+                    where_clause = " AND ".join(f"{qident(pk)}=?" for pk in pk_columns)
+                    where_values = [row[pk] for pk in pk_columns]
+                    update_sql = f"UPDATE {qident(table_name)} SET {set_clause} WHERE {where_clause}"
+                    write_cursor.execute(update_sql, params + where_values)
+                    if write_cursor.rowcount > 0:
+                        rows_updated += 1
+                        fields_updated += len(updates)
+
+    except Exception as e:
+        print(f"[SKIP] table={table_name} error={e}")
 
 if enable_replacement:
     conn.commit()
 
-conn.close()
+total_matches = table_match_count + column_match_count + value_match_count
 
+print()
+print(f"Table matches: {table_match_count}")
+print(f"Column matches: {column_match_count}")
+print(f"Value matches: {value_match_count}")
 print(f"Total matches: {total_matches}")
+print(f"Replacement enabled: {enable_replacement}")
+print(f"Rows updated: {rows_updated}")
+print(f"Fields updated: {fields_updated}")
+print(f"SQLite total changes: {conn.total_changes}")
+
+conn.close()

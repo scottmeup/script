@@ -55,20 +55,24 @@ timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
 log_filename = f"sqlite-search-{timestamp}.log"
 log_file = open(log_filename, "w", encoding="utf-8")
 
-def log_line(text=""):
+def emit(text=""):
+    print(text)
+    log_file.write(text + "\n")
+
+def log_only(text=""):
     log_file.write(text + "\n")
 
 def log_settings():
-    log_line("=== SETTINGS ===")
-    log_line(f"DB_PATH={db_path}")
-    log_line(f"SEARCH_TERMS={terms}")
-    log_line(f"REPLACE_TERMS={replace_terms}")
-    log_line(f"CASE_SENSITIVE={case_sensitive}")
-    log_line(f"SEARCH_VALUES={search_values}")
-    log_line(f"SEARCH_COLUMNS={search_columns}")
-    log_line(f"SEARCH_TABLES={search_tables}")
-    log_line(f"ENABLE_REPLACEMENT={enable_replacement}")
-    log_line("")
+    emit("=== SETTINGS ===")
+    emit(f"DB_PATH={db_path}")
+    emit(f"SEARCH_TERMS={terms}")
+    emit(f"REPLACE_TERMS={replace_terms}")
+    emit(f"CASE_SENSITIVE={case_sensitive}")
+    emit(f"SEARCH_VALUES={search_values}")
+    emit(f"SEARCH_COLUMNS={search_columns}")
+    emit(f"SEARCH_TABLES={search_tables}")
+    emit(f"ENABLE_REPLACEMENT={enable_replacement}")
+    emit("")
 
 def all_match_indices(text):
     matched = []
@@ -121,6 +125,52 @@ def get_row_identity(row, rowid_ok, pk_columns):
         return "pk=" + ",".join(pairs)
     return "row=unknown"
 
+def build_where_clause_and_params(row, rowid_ok, pk_columns):
+    if rowid_ok and "__copilot_rowid__" in row.keys():
+        return "rowid = ?", [row["__copilot_rowid__"]]
+    if pk_columns:
+        return " AND ".join(f"{qident(pk)}=?" for pk in pk_columns), [row[pk] for pk in pk_columns]
+    return None, None
+
+def fetch_current_value(cursor, table_name, column_name, row, rowid_ok, pk_columns):
+    where_clause, where_params = build_where_clause_and_params(row, rowid_ok, pk_columns)
+    if where_clause is None:
+        return False, None, "No row identifier available for verification"
+    sql = f"SELECT {qident(column_name)} AS v FROM {qident(table_name)} WHERE {where_clause}"
+    result = cursor.execute(sql, where_params).fetchone()
+    if result is None:
+        return False, None, "Verification select found no row"
+    return True, result["v"], None
+
+def update_and_verify_cell(conn, read_cursor, write_cursor, table_name, column_name, row, rowid_ok, pk_columns, old_value, new_value):
+    where_clause, where_params = build_where_clause_and_params(row, rowid_ok, pk_columns)
+    if where_clause is None:
+        return False, False, False, "No row identifier available for update"
+
+    if old_value == new_value:
+        return True, False, False, None
+
+    try:
+        before_ok, before_db_value, before_err = fetch_current_value(read_cursor, table_name, column_name, row, rowid_ok, pk_columns)
+        if not before_ok:
+            return False, False, False, before_err
+        if before_db_value != old_value:
+            return False, False, False, f"Pre-update verification mismatch old_db_value={before_db_value!r} expected_old_value={old_value!r}"
+
+        sql = f"UPDATE {qident(table_name)} SET {qident(column_name)} = ? WHERE {where_clause}"
+        write_cursor.execute(sql, [new_value] + where_params)
+
+        after_ok, after_db_value, after_err = fetch_current_value(read_cursor, table_name, column_name, row, rowid_ok, pk_columns)
+        if not after_ok:
+            return False, False, False, after_err
+        if after_db_value == new_value:
+            return True, True, True, None
+        if after_db_value == old_value:
+            return True, False, False, f"Post-update verification shows unchanged value={after_db_value!r}"
+        return True, False, False, f"Post-update verification mismatch actual_value={after_db_value!r} expected_new_value={new_value!r}"
+    except Exception as e:
+        return False, False, False, str(e)
+
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
 read_cursor = conn.cursor()
@@ -129,17 +179,21 @@ write_cursor = conn.cursor()
 table_match_count = 0
 column_match_count = 0
 value_match_count = 0
-rows_updated = 0
-fields_updated = 0
-bulk_columns_updated = 0
-bulk_cells_updated = 0
-value_update_count = 0
-column_row_log_count = 0
+column_match_row_detail_count = 0
+
+value_change_count = 0
+value_no_change_count = 0
+value_failed_change_count = 0
+
+column_change_count = 0
+column_no_change_count = 0
+column_failed_change_count = 0
+
 skipped_table_count = 0
 
 try:
     log_settings()
-    log_line("=== MATCHES AND MODIFICATIONS ===")
+    emit("=== MATCHES AND MODIFICATIONS ===")
 
     tables = get_tables(read_cursor)
 
@@ -147,9 +201,7 @@ try:
         if search_tables:
             table_matches = all_match_indices(table_name)
             for idx in table_matches:
-                msg = f"[TABLE MATCH] table={table_name} term={terms[idx]}"
-                print(msg)
-                log_line(msg)
+                emit(f"[TABLE MATCH] table={table_name} term={terms[idx]}")
                 table_match_count += 1
 
         try:
@@ -168,9 +220,7 @@ try:
                         matched_columns[col] = column_matches
                         matched_column_first_idx[col] = first_match_index(col)
                     for idx in column_matches:
-                        msg = f"[COLUMN MATCH] table={table_name} column={col} term={terms[idx]}"
-                        print(msg)
-                        log_line(msg)
+                        emit(f"[COLUMN MATCH] table={table_name} column={col} term={terms[idx]}")
                         column_match_count += 1
 
             if search_values or (search_columns and matched_columns):
@@ -184,7 +234,6 @@ try:
 
                 for row in rows:
                     row_identity = get_row_identity(row, rowid_ok, pk_columns)
-                    updates = {}
 
                     for col in columns:
                         original_value = row[col]
@@ -195,136 +244,105 @@ try:
                             replacement_value = replace_terms[replacement_idx] if replacement_idx is not None and replacement_idx < len(replace_terms) else ""
                             for idx in matched_columns[col]:
                                 if enable_replacement:
-                                    msg = f"[COLUMN MATCH ROW] table={table_name} column={col} {row_identity} term={terms[idx]} field_contents={value_text!r} new_field_contents={replacement_value!r}"
+                                    emit(f"[COLUMN MATCH ROW] table={table_name} column={col} {row_identity} term={terms[idx]} field_contents={value_text!r} new_field_contents={replacement_value!r}")
                                 else:
-                                    msg = f"[COLUMN MATCH ROW] table={table_name} column={col} {row_identity} term={terms[idx]} field_contents={value_text!r}"
-                                log_line(msg)
-                                column_row_log_count += 1
+                                    emit(f"[COLUMN MATCH ROW] table={table_name} column={col} {row_identity} term={terms[idx]} field_contents={value_text!r}")
+                                column_match_row_detail_count += 1
+
+                            if enable_replacement:
+                                ok, attempted, changed, err = update_and_verify_cell(
+                                    conn,
+                                    read_cursor,
+                                    write_cursor,
+                                    table_name,
+                                    col,
+                                    row,
+                                    rowid_ok,
+                                    pk_columns,
+                                    original_value,
+                                    replacement_value
+                                )
+                                if ok and attempted and changed:
+                                    emit(f"[COLUMN VALUE UPDATE] table={table_name} column={col} {row_identity} old_field_contents={value_text!r} new_field_contents={replacement_value!r}")
+                                    column_change_count += 1
+                                elif ok and not attempted and not changed:
+                                    emit(f"[COLUMN VALUE NO CHANGE] table={table_name} column={col} {row_identity} field_contents={value_text!r} new_field_contents={replacement_value!r}")
+                                    column_no_change_count += 1
+                                else:
+                                    emit(f"[COLUMN VALUE UPDATE FAILED] table={table_name} column={col} {row_identity} old_field_contents={value_text!r} attempted_new_field_contents={replacement_value!r} error={err}")
+                                    column_failed_change_count += 1
+
+                            continue
 
                         if search_values:
                             matches = all_match_indices(value_text)
                             if matches:
-                                if enable_replacement:
-                                    if col in matched_columns:
-                                        replacement_idx = matched_column_first_idx[col]
-                                        projected_new_value = replace_terms[replacement_idx] if replacement_idx is not None and replacement_idx < len(replace_terms) else ""
-                                    else:
-                                        projected_new_value = apply_replacements(value_text)
-                                else:
-                                    projected_new_value = None
+                                projected_new_value = None
+                                if enable_replacement and original_value is not None:
+                                    projected_new_value = apply_replacements(value_text)
 
                                 for idx in matches:
-                                    if enable_replacement:
-                                        msg = f"[VALUE MATCH] table={table_name} column={col} {row_identity} term={terms[idx]} field_contents={value_text!r} new_field_contents={projected_new_value!r}"
+                                    if enable_replacement and original_value is not None:
+                                        emit(f"[VALUE MATCH] table={table_name} column={col} {row_identity} term={terms[idx]} field_contents={value_text!r} new_field_contents={projected_new_value!r}")
                                     else:
-                                        msg = f"[VALUE MATCH] table={table_name} column={col} {row_identity} term={terms[idx]} field_contents={value_text!r}"
-                                    print(msg)
-                                    log_line(msg)
+                                        emit(f"[VALUE MATCH] table={table_name} column={col} {row_identity} term={terms[idx]} field_contents={value_text!r}")
                                     value_match_count += 1
 
-                            if enable_replacement and col not in matched_columns and original_value is not None:
-                                new_value = apply_replacements(value_text)
-                                if new_value != value_text:
-                                    updates[col] = new_value
-
-                    if enable_replacement and updates:
-                        set_clause = ", ".join(f"{qident(col)}=?" for col in updates.keys())
-                        params = [updates[col] for col in updates.keys()]
-
-                        if rowid_ok:
-                            where_value = row["__copilot_rowid__"]
-                            update_sql = f"UPDATE {qident(table_name)} SET {set_clause} WHERE rowid = ?"
-                            before_changes = conn.total_changes
-                            write_cursor.execute(update_sql, params + [where_value])
-                            delta = conn.total_changes - before_changes
-                            if delta > 0:
-                                rows_updated += 1
-                                fields_updated += len(updates)
-                                value_update_count += len(updates)
-                                for updated_col, new_value in updates.items():
-                                    mod_msg = f"[VALUE UPDATE] table={table_name} column={updated_col} {row_identity} old_field_contents={normalize(row[updated_col])!r} new_field_contents={new_value!r}"
-                                    print(mod_msg)
-                                    log_line(mod_msg)
-
-                        elif pk_columns:
-                            where_clause = " AND ".join(f"{qident(pk)}=?" for pk in pk_columns)
-                            where_values = [row[pk] for pk in pk_columns]
-                            update_sql = f"UPDATE {qident(table_name)} SET {set_clause} WHERE {where_clause}"
-                            before_changes = conn.total_changes
-                            write_cursor.execute(update_sql, params + where_values)
-                            delta = conn.total_changes - before_changes
-                            if delta > 0:
-                                rows_updated += 1
-                                fields_updated += len(updates)
-                                value_update_count += len(updates)
-                                for updated_col, new_value in updates.items():
-                                    mod_msg = f"[VALUE UPDATE] table={table_name} column={updated_col} {row_identity} old_field_contents={normalize(row[updated_col])!r} new_field_contents={new_value!r}"
-                                    print(mod_msg)
-                                    log_line(mod_msg)
-
-            if enable_replacement and matched_columns:
-                for col, match_indices in matched_columns.items():
-                    replacement_idx = matched_column_first_idx[col]
-                    replacement = replace_terms[replacement_idx] if replacement_idx is not None and replacement_idx < len(replace_terms) else ""
-                    try:
-                        update_sql = f"UPDATE {qident(table_name)} SET {qident(col)} = ?"
-                        before_changes = conn.total_changes
-                        write_cursor.execute(update_sql, (replacement,))
-                        delta = conn.total_changes - before_changes
-                        if delta > 0:
-                            bulk_columns_updated += 1
-                            bulk_cells_updated += delta
-                            mod_msg = f"[COLUMN VALUE REPLACEMENT] table={table_name} column={col} replacement_term={terms[replacement_idx]} replacement_value={replacement!r} rows_changed={delta}"
-                            print(mod_msg)
-                            log_line(mod_msg)
-                    except Exception as e:
-                        err_msg = f"[SKIP COLUMN VALUE REPLACEMENT] table={table_name} column={col} error={e}"
-                        print(err_msg)
-                        log_line(err_msg)
+                                if enable_replacement and original_value is not None:
+                                    ok, attempted, changed, err = update_and_verify_cell(
+                                        conn,
+                                        read_cursor,
+                                        write_cursor,
+                                        table_name,
+                                        col,
+                                        row,
+                                        rowid_ok,
+                                        pk_columns,
+                                        original_value,
+                                        projected_new_value
+                                    )
+                                    if ok and attempted and changed:
+                                        emit(f"[VALUE UPDATE] table={table_name} column={col} {row_identity} old_field_contents={value_text!r} new_field_contents={projected_new_value!r}")
+                                        value_change_count += 1
+                                    elif ok and not attempted and not changed:
+                                        emit(f"[VALUE NO CHANGE] table={table_name} column={col} {row_identity} field_contents={value_text!r} new_field_contents={projected_new_value!r}")
+                                        value_no_change_count += 1
+                                    else:
+                                        emit(f"[VALUE UPDATE FAILED] table={table_name} column={col} {row_identity} old_field_contents={value_text!r} attempted_new_field_contents={projected_new_value!r} error={err}")
+                                        value_failed_change_count += 1
 
         except Exception as e:
             skipped_table_count += 1
-            err_msg = f"[SKIP] table={table_name} error={e}"
-            print(err_msg)
-            log_line(err_msg)
+            emit(f"[SKIP] table={table_name} error={e}")
 
     if enable_replacement:
         conn.commit()
 
     total_matches = table_match_count + column_match_count + value_match_count
+    total_actual_changes = value_change_count + column_change_count
+    total_no_change = value_no_change_count + column_no_change_count
+    total_failed_changes = value_failed_change_count + column_failed_change_count
 
-    log_line("")
-    log_line("=== SUMMARY ===")
-    log_line(f"Table matches: {table_match_count}")
-    log_line(f"Column matches: {column_match_count}")
-    log_line(f"Column match row details logged: {column_row_log_count}")
-    log_line(f"Value matches: {value_match_count}")
-    log_line(f"Total matches: {total_matches}")
-    log_line(f"Replacement enabled: {enable_replacement}")
-    log_line(f"Rows updated: {rows_updated}")
-    log_line(f"Fields updated: {fields_updated}")
-    log_line(f"Value updates logged: {value_update_count}")
-    log_line(f"Bulk columns updated: {bulk_columns_updated}")
-    log_line(f"Bulk cells updated: {bulk_cells_updated}")
-    log_line(f"Skipped tables: {skipped_table_count}")
-    log_line(f"SQLite total changes: {conn.total_changes}")
-    log_line(f"Log file: {log_filename}")
-
-    print()
-    print(f"Table matches: {table_match_count}")
-    print(f"Column matches: {column_match_count}")
-    print(f"Column match row details logged: {column_row_log_count}")
-    print(f"Value matches: {value_match_count}")
-    print(f"Total matches: {total_matches}")
-    print(f"Replacement enabled: {enable_replacement}")
-    print(f"Rows updated: {rows_updated}")
-    print(f"Fields updated: {fields_updated}")
-    print(f"Value updates logged: {value_update_count}")
-    print(f"Bulk columns updated: {bulk_columns_updated}")
-    print(f"Bulk cells updated: {bulk_cells_updated}")
-    print(f"Skipped tables: {skipped_table_count}")
-    print(f"SQLite total changes: {conn.total_changes}")
-    print(f"Log file: {log_filename}")
+    emit("")
+    emit("=== SUMMARY ===")
+    emit(f"Table matches: {table_match_count}")
+    emit(f"Column matches: {column_match_count}")
+    emit(f"Column match row details logged: {column_match_row_detail_count}")
+    emit(f"Value matches: {value_match_count}")
+    emit(f"Total matches: {total_matches}")
+    emit(f"Replacement enabled: {enable_replacement}")
+    emit(f"Value changes applied: {value_change_count}")
+    emit(f"Value no-change replacements: {value_no_change_count}")
+    emit(f"Value failed changes: {value_failed_change_count}")
+    emit(f"Column-wide changes applied: {column_change_count}")
+    emit(f"Column-wide no-change replacements: {column_no_change_count}")
+    emit(f"Column-wide failed changes: {column_failed_change_count}")
+    emit(f"Total actual changes applied: {total_actual_changes}")
+    emit(f"Total no-change replacements: {total_no_change}")
+    emit(f"Total failed changes: {total_failed_changes}")
+    emit(f"Skipped tables: {skipped_table_count}")
+    emit(f"SQLite total changes: {conn.total_changes}")
+    emit(f"Log file: {log_filename}")
 
 finally:
     conn.close()

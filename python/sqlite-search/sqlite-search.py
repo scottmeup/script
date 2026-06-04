@@ -14,7 +14,9 @@ def parse_bool(name, default=False):
 
 def parse_list(name, default=""):
     value = os.getenv(name, default)
-    return [item.strip() for item in value.split(",")] if value else []
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",")]
 
 def qident(name):
     return '"' + str(name).replace('"', '""') + '"'
@@ -53,12 +55,18 @@ def normalize(value):
         return ""
     return str(value)
 
-def find_matches(text):
+def all_match_indices(text):
     matched = []
     for i, pattern in enumerate(compiled_patterns):
         if pattern.search(text):
             matched.append(i)
     return matched
+
+def first_match_index(text):
+    for i, pattern in enumerate(compiled_patterns):
+        if pattern.search(text):
+            return i
+    return None
 
 def apply_replacements(text):
     new_text = text
@@ -93,12 +101,14 @@ column_match_count = 0
 value_match_count = 0
 rows_updated = 0
 fields_updated = 0
+bulk_columns_updated = 0
+bulk_cells_updated = 0
 
 tables = get_tables()
 
 for table_name in tables:
     if search_tables:
-        table_matches = find_matches(table_name)
+        table_matches = all_match_indices(table_name)
         for idx in table_matches:
             print(f"[TABLE MATCH] table={table_name} term={terms[idx]}")
             table_match_count += 1
@@ -109,81 +119,81 @@ for table_name in tables:
         pk_columns = get_pk_columns(table_info)
         rowid_ok = has_rowid_table(table_name)
 
+        matched_columns = {}
+
         if search_columns:
             for col in columns:
-                column_matches = find_matches(col)
+                column_matches = all_match_indices(col)
                 for idx in column_matches:
                     print(f"[COLUMN MATCH] table={table_name} column={col} term={terms[idx]}")
                     column_match_count += 1
+                first_idx = first_match_index(col)
+                if first_idx is not None:
+                    matched_columns[col] = first_idx
 
-        if not search_values:
-            continue
+        if search_values:
+            select_columns = []
+            if rowid_ok:
+                select_columns.append("rowid AS __copilot_rowid__")
+            select_columns.extend([qident(c) for c in columns])
 
-        select_columns = []
-        if rowid_ok:
-            select_columns.append("rowid AS __copilot_rowid__")
-        select_columns.extend([qident(c) for c in columns])
+            select_sql = f"SELECT {', '.join(select_columns)} FROM {qident(table_name)}"
+            rows = read_cursor.execute(select_sql).fetchall()
 
-        select_sql = f"SELECT {', '.join(select_columns)} FROM {qident(table_name)}"
-        rows = read_cursor.execute(select_sql).fetchall()
+            for row in rows:
+                updates = {}
 
-        for row in rows:
-            updates = {}
-            row_had_value_match = False
+                for col in columns:
+                    original_value = row[col]
+                    value_text = normalize(original_value)
+                    matches = all_match_indices(value_text)
 
-            for col in columns:
-                original_value = row[col]
-                value_text = normalize(original_value)
-                matches = find_matches(value_text)
+                    if matches:
+                        for idx in matches:
+                            print(f"[VALUE MATCH] table={table_name} column={col} term={terms[idx]} value={value_text}")
+                            value_match_count += 1
 
-                if matches:
-                    row_had_value_match = True
-                    for idx in matches:
-                        print(f"[VALUE MATCH] table={table_name} column={col} term={terms[idx]} value={value_text}")
-                        value_match_count += 1
-
-                    if enable_replacement and original_value is not None:
+                    if enable_replacement and col not in matched_columns and original_value is not None:
                         new_value = apply_replacements(value_text)
                         if new_value != value_text:
                             updates[col] = new_value
 
-            if enable_replacement and updates:
-                set_clause = ", ".join(f"{qident(col)}=?" for col in updates.keys())
-                params = [updates[col] for col in updates.keys()]
+                if enable_replacement and updates:
+                    set_clause = ", ".join(f"{qident(col)}=?" for col in updates.keys())
+                    params = [updates[col] for col in updates.keys()]
 
-                if rowid_ok:
-                    where_clause = "__copilot_rowid__ = ?"
-                    where_value = row["__copilot_rowid__"]
-                    update_sql = f"UPDATE {qident(table_name)} SET {set_clause} WHERE rowid = ?"
-                    write_cursor.execute(update_sql, params + [where_value])
-                    if write_cursor.rowcount > 0:
-                        rows_updated += 1
-                        fields_updated += len(updates)
-                elif pk_columns:
-                    where_clause = " AND ".join(f"{qident(pk)}=?" for pk in pk_columns)
-                    where_values = [row[pk] for pk in pk_columns]
-                    update_sql = f"UPDATE {qident(table_name)} SET {set_clause} WHERE {where_clause}"
-                    write_cursor.execute(update_sql, params + where_values)
-                    if write_cursor.rowcount > 0:
-                        rows_updated += 1
-                        fields_updated += len(updates)
+                    if rowid_ok:
+                        where_value = row["__copilot_rowid__"]
+                        update_sql = f"UPDATE {qident(table_name)} SET {set_clause} WHERE rowid = ?"
+                        before_changes = conn.total_changes
+                        write_cursor.execute(update_sql, params + [where_value])
+                        delta = conn.total_changes - before_changes
+                        if delta > 0:
+                            rows_updated += 1
+                            fields_updated += len(updates)
+                    elif pk_columns:
+                        where_clause = " AND ".join(f"{qident(pk)}=?" for pk in pk_columns)
+                        where_values = [row[pk] for pk in pk_columns]
+                        update_sql = f"UPDATE {qident(table_name)} SET {set_clause} WHERE {where_clause}"
+                        before_changes = conn.total_changes
+                        write_cursor.execute(update_sql, params + where_values)
+                        delta = conn.total_changes - before_changes
+                        if delta > 0:
+                            rows_updated += 1
+                            fields_updated += len(updates)
 
-    except Exception as e:
-        print(f"[SKIP] table={table_name} error={e}")
+        if enable_replacement and matched_columns:
+            row_count = read_cursor.execute(f"SELECT COUNT(*) AS c FROM {qident(table_name)}").fetchone()["c"]
 
-if enable_replacement:
-    conn.commit()
-
-total_matches = table_match_count + column_match_count + value_match_count
-
-print()
-print(f"Table matches: {table_match_count}")
-print(f"Column matches: {column_match_count}")
-print(f"Value matches: {value_match_count}")
-print(f"Total matches: {total_matches}")
-print(f"Replacement enabled: {enable_replacement}")
-print(f"Rows updated: {rows_updated}")
-print(f"Fields updated: {fields_updated}")
-print(f"SQLite total changes: {conn.total_changes}")
-
-conn.close()
+            for col, idx in matched_columns.items():
+                replacement = replace_terms[idx] if idx < len(replace_terms) else ""
+                try:
+                    update_sql = f"UPDATE {qident(table_name)} SET {qident(col)} = ?"
+                    before_changes = conn.total_changes
+                    write_cursor.execute(update_sql, (replacement,))
+                    delta = conn.total_changes - before_changes
+                    if delta > 0:
+                        bulk_columns_updated += 1
+                        bulk_cells_updated += delta
+                        print(f"[COLUMN VALUE REPLACEMENT] table={table_name} column={col} term={terms[idx]} replacement={replacement} rows_targeted={row_count} rows_changed={delta}")
+                except Exception as e:

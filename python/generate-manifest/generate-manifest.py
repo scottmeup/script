@@ -73,9 +73,9 @@ def main():
     ]
 
     if not roots:
-        raise SystemExit("MANIFEST_ROOTS is required in .env.manifest")
+        raise SystemExit("MANIFEST_ROOTS is required in .env")
 
-    output_path = Path(env.get("MANIFEST_OUTPUT", "baseline-candidates-manifest.json"))
+    output_path = Path(env.get("MANIFEST_OUTPUT", "manifest.json"))
     output_path.write_text(
         json.dumps(build_manifest(roots), indent=2),
         encoding="utf-8"

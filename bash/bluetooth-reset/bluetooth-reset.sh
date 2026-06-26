@@ -1,6 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+#troubleshooting section
+systemctl stop gymnasticon || true
+pkill -f '/opt/gymnasticon|node' || true
+systemctl stop bluetooth || true
+pkill -x bluetoothd || true
+rfkill unblock bluetooth || true
+modprobe -r btusb btintel btbcm btrtl || true
+modprobe btusb
+sleep 2
+hciconfig hci0 up
+systemctl start bluetooth
+sleep 1
+btmgmt --index 0 power on
+btmgmt --index 0 connectable on
+btmgmt --index 0 le on
+btmgmt --index 0 name gymnasticon-test
+btmgmt --index 0 advertising on
+
+#verify status
+hciconfig -a
+btmgmt info
+hcitool dev
+
+#OPTIONAL - bring up advertising
+btmgmt --index 0 name gymnasticon-test
+btmgmt --index 0 advertising on
+
+
+
+
 ENV_FILE="${ENV_FILE:-/opt/gymnasticon-bt.env}"
 
 if [[ -f "$ENV_FILE" ]]; then

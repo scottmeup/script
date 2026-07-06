@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# copy this file to /usr/local/sbin/freepbx-wanip-registration-recover and make it executable with:
-# chmod 750 /usr/local/sbin/freepbx-wanip-registration-recover
-# bash -n /usr/local/sbin/freepbx-wanip-registration-recover
-
+# install this file to /usr/local/sbin/freepbx-wanip-registration-recover
 set -euo pipefail
 
 ENV_FILE="${ENV_FILE:-/etc/freepbx-wanip-hosts/freepbx-wanip-hosts.env}"
@@ -15,9 +12,10 @@ fi
 . "$ENV_FILE"
 
 TRUNK_NAME="${TRUNK_NAME:?TRUNK_NAME is required}"
-REGISTER_STATUS_CHECK_INTERVAL_SECONDS="${REGISTER_STATUS_CHECK_INTERVAL_SECONDS:-3}"
-REGISTER_COMMAND_INTERVAL_SECONDS="${REGISTER_COMMAND_INTERVAL_SECONDS:-15}"
+REGISTER_STATUS_CHECK_INTERVAL_SECONDS="${REGISTER_STATUS_CHECK_INTERVAL_SECONDS:-1}"
+REGISTER_COMMAND_INTERVAL_SECONDS="${REGISTER_COMMAND_INTERVAL_SECONDS:-10}"
 REGISTER_FAILURE_TIMEOUT_SECONDS="${REGISTER_FAILURE_TIMEOUT_SECONDS:-180}"
+REGISTER_STABLE_CHECKS="${REGISTER_STABLE_CHECKS:-5}"
 ASTERISK_RESTART_ON_REGISTRATION_FAILURE="${ASTERISK_RESTART_ON_REGISTRATION_FAILURE:-yes}"
 ASTERISK_RESTART_CALL_CHECK_INTERVAL_SECONDS="${ASTERISK_RESTART_CALL_CHECK_INTERVAL_SECONDS:-5}"
 ASTERISK_RESTART_WAIT_TIMEOUT_SECONDS="${ASTERISK_RESTART_WAIT_TIMEOUT_SECONDS:-0}"
@@ -76,18 +74,19 @@ registration_retry_loop() {
   timeout_seconds="$1"
   start_epoch="$(date +%s)"
   last_register_epoch=0
+  stable_checks=0
 
   while true; do
     now_epoch="$(date +%s)"
     elapsed="$((now_epoch - start_epoch))"
 
     if [ "$elapsed" -ge "$timeout_seconds" ]; then
-      if is_registered; then
-        log_msg "$TRUNK_NAME is Registered"
+      if [ "$stable_checks" -ge "$REGISTER_STABLE_CHECKS" ]; then
+        log_msg "$TRUNK_NAME is Registered and stable"
         return 0
       fi
 
-      log_msg "$TRUNK_NAME did not become Registered within ${timeout_seconds}s"
+      log_msg "$TRUNK_NAME did not become Registered and stable within ${timeout_seconds}s"
       return 1
     fi
 
@@ -97,15 +96,24 @@ registration_retry_loop() {
       log_msg "sending explicit register for $TRUNK_NAME"
       send_register
       last_register_epoch="$(date +%s)"
+      stable_checks=0
     fi
+
+    sleep "$REGISTER_STATUS_CHECK_INTERVAL_SECONDS"
 
     if is_registered; then
-      log_msg "$TRUNK_NAME is Registered"
-      return 0
-    fi
+      stable_checks="$((stable_checks + 1))"
 
-    log_msg "$TRUNK_NAME is not Registered; checking again in ${REGISTER_STATUS_CHECK_INTERVAL_SECONDS}s"
-    sleep "$REGISTER_STATUS_CHECK_INTERVAL_SECONDS"
+      if [ "$stable_checks" -ge "$REGISTER_STABLE_CHECKS" ]; then
+        log_msg "$TRUNK_NAME is Registered and stable"
+        return 0
+      fi
+
+      log_msg "$TRUNK_NAME is Registered; stable check ${stable_checks}/${REGISTER_STABLE_CHECKS}"
+    else
+      stable_checks=0
+      log_msg "$TRUNK_NAME is not Registered; checking again in ${REGISTER_STATUS_CHECK_INTERVAL_SECONDS}s"
+    fi
   done
 }
 

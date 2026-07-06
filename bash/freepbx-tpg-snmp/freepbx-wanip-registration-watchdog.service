@@ -1,0 +1,8 @@
+[Unit]
+Description=Watch TPG PJSIP registration and recover if down
+After=asterisk.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/freepbx-wanip-registration-watchdog

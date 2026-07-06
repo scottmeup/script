@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# copy this file to /usr/local/sbin/freepbx-wanip-registration-recover and make it executable with:
+# chmod 750 /usr/local/sbin/freepbx-wanip-registration-recover
+# bash -n /usr/local/sbin/freepbx-wanip-registration-recover
+
+set -euo pipefail
+
+ENV_FILE="${ENV_FILE:-/etc/freepbx-wanip-hosts/freepbx-wanip-hosts.env}"
+
+. "$ENV_FILE"
+
+TRUNK_NAME="${TRUNK_NAME:?TRUNK_NAME is required}"
+REGISTER_RETRY_DELAY_SECONDS="${REGISTER_RETRY_DELAY_SECONDS:-3}"
+REGISTER_FAILURE_TIMEOUT_SECONDS="${REGISTER_FAILURE_TIMEOUT_SECONDS:-180}"
+ASTERISK_RESTART_CALL_CHECK_INTERVAL_SECONDS="${ASTERISK_RESTART_CALL_CHECK_INTERVAL_SECONDS:-5}"
+ASTERISK_RESTART_WAIT_TIMEOUT_SECONDS="${ASTERISK_RESTART_WAIT_TIMEOUT_SECONDS:-0}"
+ASTERISK_RESTART_REGISTRATION_TIMEOUT_SECONDS="${ASTERISK_RESTART_REGISTRATION_TIMEOUT_SECONDS:-180}"
+ASTERISK_RESTART_ON_REGISTRATION_FAILURE="${ASTERISK_RESTART_ON_REGISTRATION_FAILURE:-yes}"
+
+log_msg() {
+  logger -t freepbx-wanip-recovery "$1"
+}
+
+is_registered() {
+  asterisk -rx "pjsip show registrations" 2>/dev/null |
+    awk -v trunk="$TRUNK_NAME" '
+      index($0, trunk "/") > 0 && index($0, "Registered") > 0 {
+        found = 1
+      }
+      END {
+        exit found ? 0 : 1
+      }
+    '
+}
+
+send_register() {
+  asterisk -rx "pjsip send register $TRUNK_NAME" >/dev/null 2>&1 || true
+}
+
+trunk_call_active() {
+  asterisk -rx "core show channels concise" 2>/dev/null |
+    grep -F "PJSIP/${TRUNK_NAME}-" >/dev/null
+}
+
+wait_for_no_trunk_calls() {
+  start_epoch="$(date +%s)"
+
+  while trunk_call_active; do
+    if [ "$ASTERISK_RESTART_WAIT_TIMEOUT_SECONDS" -gt 0 ]; then
+      now_epoch="$(date +%s)"
+      elapsed="$((now_epoch - start_epoch))"
+
+      if [ "$elapsed" -ge "$ASTERISK_RESTART_WAIT_TIMEOUT_SECONDS" ]; then
+        log_msg "restart deferred timeout reached while TPG trunk calls are still active"
+        return 1
+      fi
+    fi
+
+    log_msg "TPG trunk call active; delaying Asterisk restart"
+    sleep "$ASTERISK_RESTART_CALL_CHECK_INTERVAL_SECONDS"
+  done
+
+  return 0
+}
+
+registration_retry_loop() {
+  timeout_seconds="$1"
+  start_epoch="$(date +%s)"
+
+  while true; do
+    send_register
+
+    sleep "$REGISTER_RETRY_DELAY_SECONDS"
+
+    if is_registered; then
+      log_msg "$TRUNK_NAME is Registered"
+      return 0
+    fi
+
+    now_epoch="$(date +%s)"
+    elapsed="$((now_epoch - start_epoch))"
+
+    if [ "$elapsed" -ge "$timeout_seconds" ]; then
+      log_msg "$TRUNK_NAME did not become Registered within ${timeout_seconds}s"
+      return 1
+    fi
+
+    log_msg "$TRUNK_NAME is not Registered; retrying registration"
+  done
+}
+
+log_msg "starting WAN IP registration recovery for $TRUNK_NAME"
+
+if registration_retry_loop "$REGISTER_FAILURE_TIMEOUT_SECONDS"; then
+  exit 0
+fi
+
+if [ "$ASTERISK_RESTART_ON_REGISTRATION_FAILURE" != "yes" ]; then
+  log_msg "Asterisk restart disabled after registration failure"
+  exit 1
+fi
+
+if ! wait_for_no_trunk_calls; then
+  exit 2
+fi
+
+log_msg "restarting Asterisk after extended registration failure"
+
+systemctl restart asterisk
+
+sleep 5
+
+if registration_retry_loop "$ASTERISK_RESTART_REGISTRATION_TIMEOUT_SECONDS"; then
+  log_msg "registration recovered after Asterisk restart"
+  exit 0
+fi
+
+log_msg "registration did not recover after Asterisk restart"
+exit 3

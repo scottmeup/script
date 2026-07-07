@@ -51,10 +51,17 @@ log_msg "running registration recovery for $TRUNK_NAME"
 /usr/local/sbin/freepbx-wanip-registration-recover
 rc="$?"
 
-if [ "$rc" -eq 0 ]; then
-  log_msg "registration recovery completed successfully"
-  exit 0
-fi
-
-log_msg "registration recovery failed with exit code $rc"
-exit "$rc"
+case "$rc" in
+  0)
+    log_msg "registration recovery completed successfully"
+    exit 0
+    ;;
+  75)
+    log_msg "registration recovery already running"
+    exit 0
+    ;;
+  *)
+    log_msg "registration recovery failed with exit code $rc"
+    exit "$rc"
+    ;;
+esac

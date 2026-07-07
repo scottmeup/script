@@ -35,12 +35,13 @@ cfg = load_env(ENV_FILE)
 TPG_HOST = cfg.get('TPG_HOST', 'uni-v1.tpg.com.au')
 DNS_SERVER = cfg.get('DNS_SERVER', '').strip()
 PCAP_DIR = cfg.get('PCAP_DIR', '/var/log/tpg-sip-pcap')
+SIP_ERROR_LOG = cfg.get('SIP_ERROR_LOG', '/var/log/tpg-sip-node-errors.log')
 STATE_DIR = cfg.get('STATE_DIR', '/etc/freepbx-wanip-hosts/tpg-sip-health-state')
 LOOKBACK_SECONDS = int(cfg.get('LOOKBACK_SECONDS', '3600'))
 TCPDUMP = cfg.get('TCPDUMP', '/usr/bin/tcpdump')
 MIN_GOOD_EVENTS = int(cfg.get('MIN_GOOD_EVENTS', '1'))
 BAD_503_THRESHOLD = int(cfg.get('BAD_503_THRESHOLD', '2'))
-BAD_403_THRESHOLD = int(cfg.get('BAD_403_THRESHOLD', '2'))
+BAD_403_THRESHOLD = int(cfg.get('BAD_403_THRESHOLD', '1'))
 STALE_AFTER_SECONDS = int(cfg.get('STALE_AFTER_SECONDS', str(LOOKBACK_SECONDS)))
 DNS_TIMEOUT_SECONDS = int(cfg.get('DNS_TIMEOUT_SECONDS', '5'))
 
@@ -52,12 +53,7 @@ def resolve_nodes(host, dns_server):
     nodes = []
     if dns_server:
         try:
-            proc = subprocess.run(
-                ['dig', f'@{dns_server}', '+short', host, 'A'],
-                capture_output=True,
-                text=True,
-                timeout=DNS_TIMEOUT_SECONDS,
-            )
+            proc = subprocess.run(['dig', f'@{dns_server}', '+short', host, 'A'], capture_output=True, text=True, timeout=DNS_TIMEOUT_SECONDS)
             if proc.returncode == 0:
                 for line in proc.stdout.splitlines():
                     line = line.strip()
@@ -87,14 +83,13 @@ if not TPG_NODES:
 
 nodes = set(TPG_NODES)
 
-packet_re = re.compile(r'^\S+\s+\S+\s+IP\s+([^\s]+)\.5060\s+>\s+([^\s]+)\.5060: SIP(?::\s*(.*))?$')
-status_re = re.compile(r'SIP/2\.0\s+(\d{3})\s+(.*)')
+packet_re = re.compile(r'^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(?:(?:\S+)\s+)?(?:(?:In|Out)\s+)?IP\s+([^\s]+)\.5060\s+>\s+([^\s]+)\.5060:\s+SIP(?::\s*(.*))?$', re.IGNORECASE)
+status_re = re.compile(r'SIP/2\.0\s+(\d{3})\s+([^\r\n]+)')
 cseq_re = re.compile(r'^CSeq:\s*\d+\s+([A-Z]+)', re.IGNORECASE)
 request_re = re.compile(r'^(INVITE|REGISTER|OPTIONS|ACK|CANCEL|BYE)\s+', re.IGNORECASE)
+error_log_re = re.compile(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})([+-]\d{4}).*node=([0-9.]+).*status="SIP/2\.0\s+(\d{3})\s+([^"]+)".*cseq="\d+\s+([A-Z]+)"', re.IGNORECASE)
 
 def clean_ip(endpoint):
-    if endpoint.startswith('['):
-        return endpoint
     ip = endpoint.rsplit('.', 1)[0]
     try:
         return str(ipaddress.ip_address(ip))
@@ -117,17 +112,23 @@ def event_bucket():
         'other_5xx': 0,
         'other_4xx': 0,
         'total_sip_packets': 0,
+        'pcap_events': 0,
+        'error_log_events': 0,
         'last_status': '',
         'last_cseq_method': '',
     }
 
 health = {node: event_bucket() for node in TPG_NODES}
 
-def update_seen(node, ts, status_text='', cseq_method=''):
+def update_seen(node, ts, status_text='', cseq_method='', source='pcap'):
     if node not in health:
         return
     bucket = health[node]
     bucket['total_sip_packets'] += 1
+    if source == 'pcap':
+        bucket['pcap_events'] += 1
+    elif source == 'error_log':
+        bucket['error_log_events'] += 1
     if ts > bucket['last_seen_epoch']:
         bucket['last_seen_epoch'] = ts
         bucket['last_seen_iso'] = dt.datetime.fromtimestamp(ts, dt.timezone.utc).isoformat()
@@ -135,6 +136,50 @@ def update_seen(node, ts, status_text='', cseq_method=''):
             bucket['last_status'] = status_text
         if cseq_method:
             bucket['last_cseq_method'] = cseq_method
+
+def apply_status(node, ts, code, reason, method, source='pcap'):
+    if node not in health or not method:
+        return
+    method = method.upper()
+    status_text = f'{code} {reason}'.strip()
+    update_seen(node, ts, status_text, method, source)
+    bucket = health[node]
+    if method == 'REGISTER':
+        if code == 200:
+            bucket['register_200'] += 1
+        elif code in (401, 407):
+            bucket['register_401_407'] += 1
+        elif code == 503:
+            bucket['register_503'] += 1
+        elif 500 <= code <= 599:
+            bucket['other_5xx'] += 1
+        elif 400 <= code <= 499:
+            bucket['other_4xx'] += 1
+    elif method == 'INVITE':
+        if code == 407:
+            bucket['invite_407'] += 1
+        elif code in (180, 183):
+            bucket['invite_180_183'] += 1
+        elif code == 200:
+            bucket['invite_200'] += 1
+        elif code == 503:
+            bucket['invite_503'] += 1
+        elif code == 403:
+            bucket['invite_403'] += 1
+        elif 500 <= code <= 599:
+            bucket['other_5xx'] += 1
+        elif 400 <= code <= 499:
+            bucket['other_4xx'] += 1
+
+def parse_timestamp(date_part, time_part, fallback):
+    try:
+        parsed = dt.datetime.strptime(f'{date_part} {time_part}', '%Y-%m-%d %H:%M:%S.%f')
+    except ValueError:
+        try:
+            parsed = dt.datetime.strptime(f'{date_part} {time_part}', '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            return fallback
+    return parsed.replace(tzinfo=dt.datetime.now().astimezone().tzinfo).timestamp()
 
 pcaps = []
 for path in glob.glob(os.path.join(PCAP_DIR, '*.pcap')):
@@ -154,65 +199,55 @@ for pcap in pcaps:
         line = raw.rstrip('\n')
         match = packet_re.match(line)
         if match:
-            try:
-                stamp = ' '.join(line.split()[0:2])
-                parsed = dt.datetime.strptime(stamp, '%Y-%m-%d %H:%M:%S.%f')
-                ts = parsed.replace(tzinfo=dt.datetime.now().astimezone().tzinfo).timestamp()
-            except Exception:
-                ts = os.path.getmtime(pcap)
-            src = clean_ip(match.group(1))
-            dst = clean_ip(match.group(2))
-            summary = match.group(3) or ''
+            ts = parse_timestamp(match.group(1), match.group(2), os.path.getmtime(pcap))
+            src = clean_ip(match.group(3))
+            dst = clean_ip(match.group(4))
+            summary = match.group(5) or ''
             node = src if src in nodes else dst if dst in nodes else None
-            current = {'ts': ts, 'src': src, 'dst': dst, 'node': node, 'summary': summary, 'cseq': '', 'status': '', 'status_code': None, 'request': ''}
+            current = {'ts': ts, 'src': src, 'dst': dst, 'node': node, 'status_code': None, 'status_reason': '', 'cseq': ''}
             if node:
-                update_seen(node, ts)
+                update_seen(node, ts, source='pcap')
                 sm = status_re.search(summary)
-                rm = request_re.search(summary)
                 if sm:
                     current['status_code'] = int(sm.group(1))
-                    current['status'] = f'{sm.group(1)} {sm.group(2).strip()}'
-                elif rm:
-                    current['request'] = rm.group(1).upper()
-                    if src == node and current['request'] == 'INVITE':
-                        health[node]['inbound_invite'] += 1
+                    current['status_reason'] = sm.group(2).strip()
+                rm = request_re.search(summary)
+                if rm and src == node and rm.group(1).upper() == 'INVITE':
+                    health[node]['inbound_invite'] += 1
             continue
         if current is None or current.get('node') not in health:
             continue
+        sm = status_re.search(line)
+        if sm:
+            current['status_code'] = int(sm.group(1))
+            current['status_reason'] = sm.group(2).strip()
+        rm = request_re.search(line)
+        if rm and current['src'] == current['node'] and rm.group(1).upper() == 'INVITE':
+            health[current['node']]['inbound_invite'] += 1
         cseq = cseq_re.match(line)
         if cseq:
             current['cseq'] = cseq.group(1).upper()
-            health[current['node']]['last_cseq_method'] = current['cseq']
-            code = current.get('status_code')
-            node = current['node']
-            if code is not None:
-                health[node]['last_status'] = current['status']
-                if current['cseq'] == 'REGISTER':
-                    if code == 200:
-                        health[node]['register_200'] += 1
-                    elif code in (401, 407):
-                        health[node]['register_401_407'] += 1
-                    elif code == 503:
-                        health[node]['register_503'] += 1
-                    elif 500 <= code <= 599:
-                        health[node]['other_5xx'] += 1
-                    elif 400 <= code <= 499:
-                        health[node]['other_4xx'] += 1
-                elif current['cseq'] == 'INVITE':
-                    if code == 407:
-                        health[node]['invite_407'] += 1
-                    elif code in (180, 183):
-                        health[node]['invite_180_183'] += 1
-                    elif code == 200:
-                        health[node]['invite_200'] += 1
-                    elif code == 503:
-                        health[node]['invite_503'] += 1
-                    elif code == 403:
-                        health[node]['invite_403'] += 1
-                    elif 500 <= code <= 599:
-                        health[node]['other_5xx'] += 1
-                    elif 400 <= code <= 499:
-                        health[node]['other_4xx'] += 1
+            if current['status_code'] is not None:
+                apply_status(current['node'], current['ts'], current['status_code'], current['status_reason'], current['cseq'], 'pcap')
+
+if os.path.exists(SIP_ERROR_LOG):
+    with open(SIP_ERROR_LOG, 'r', encoding='utf-8', errors='ignore') as handle:
+        for raw in handle:
+            match = error_log_re.match(raw.strip())
+            if not match:
+                continue
+            node = match.group(3)
+            if node not in health:
+                continue
+            stamp = match.group(1) + match.group(2)
+            try:
+                parsed = dt.datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%S%z')
+            except ValueError:
+                continue
+            ts = parsed.timestamp()
+            if ts < cutoff:
+                continue
+            apply_status(node, ts, int(match.group(4)), match.group(5), match.group(6), 'error_log')
 
 def classify(bucket):
     good = bucket['register_200'] + bucket['register_401_407'] + bucket['invite_407'] + bucket['invite_180_183'] + bucket['invite_200'] + bucket['inbound_invite']
@@ -225,9 +260,9 @@ def classify(bucket):
         return 'bad_503', good, bad503, bad403
     if bad403 >= BAD_403_THRESHOLD and good == 0:
         return 'bad_403', good, bad503, bad403
-    if good >= MIN_GOOD_EVENTS and bad503 == 0:
+    if good >= MIN_GOOD_EVENTS and bad503 == 0 and bad403 == 0:
         return 'healthy', good, bad503, bad403
-    if good >= MIN_GOOD_EVENTS and bad503 > 0:
+    if good >= MIN_GOOD_EVENTS and (bad503 > 0 or bad403 > 0):
         return 'mixed', good, bad503, bad403
     if bad503 > 0 or bad403 > 0:
         return 'degraded', good, bad503, bad403
@@ -237,8 +272,7 @@ records = []
 for node in TPG_NODES:
     bucket = health[node]
     state, good, bad503, bad403 = classify(bucket)
-    record = {'node': node, 'state': state, 'good_events': good, 'bad_503_events': bad503, 'bad_403_events': bad403, **bucket}
-    records.append(record)
+    records.append({'node': node, 'state': state, 'good_events': good, 'bad_503_events': bad503, 'bad_403_events': bad403, **bucket})
 
 json_path = os.path.join(STATE_DIR, 'sip-health.json')
 tsv_path = os.path.join(STATE_DIR, 'sip-health.tsv')
@@ -248,7 +282,7 @@ resolved_path = os.path.join(STATE_DIR, 'resolved-nodes.txt')
 with open(json_path, 'w', encoding='utf-8') as handle:
     json.dump({'generated_at': now.isoformat(), 'host': TPG_HOST, 'resolved_nodes': TPG_NODES, 'lookback_seconds': LOOKBACK_SECONDS, 'records': records}, handle, indent=2, sort_keys=True)
 
-columns = ['node', 'state', 'good_events', 'bad_503_events', 'bad_403_events', 'register_200', 'register_401_407', 'invite_407', 'invite_180_183', 'invite_200', 'inbound_invite', 'register_503', 'invite_503', 'invite_403', 'last_seen_iso', 'last_status', 'last_cseq_method']
+columns = ['node', 'state', 'good_events', 'bad_503_events', 'bad_403_events', 'register_200', 'register_401_407', 'invite_407', 'invite_180_183', 'invite_200', 'inbound_invite', 'register_503', 'invite_503', 'invite_403', 'pcap_events', 'error_log_events', 'last_seen_iso', 'last_status', 'last_cseq_method']
 with open(tsv_path, 'w', encoding='utf-8') as handle:
     handle.write('\t'.join(columns) + '\n')
     for record in records:
@@ -258,7 +292,7 @@ with open(summary_path, 'w', encoding='utf-8') as handle:
     handle.write(f'host={TPG_HOST}\n')
     handle.write(f'resolved_nodes={" ".join(TPG_NODES)}\n')
     for record in records:
-        handle.write(f"{record['node']} {record['state']} good={record['good_events']} 503={record['bad_503_events']} 403={record['bad_403_events']} last={record['last_seen_iso']} status={record['last_status']} cseq={record['last_cseq_method']}\n")
+        handle.write(f"{record['node']} {record['state']} good={record['good_events']} 503={record['bad_503_events']} 403={record['bad_403_events']} pcap={record['pcap_events']} errlog={record['error_log_events']} last={record['last_seen_iso']} status={record['last_status']} cseq={record['last_cseq_method']}\n")
 
 with open(resolved_path, 'w', encoding='utf-8') as handle:
     for node in TPG_NODES:
@@ -267,4 +301,4 @@ with open(resolved_path, 'w', encoding='utf-8') as handle:
 print(f'host={TPG_HOST}')
 print(f'resolved_nodes={" ".join(TPG_NODES)}')
 for record in records:
-    print(f"{record['node']}\t{record['state']}\tgood={record['good_events']}\t503={record['bad_503_events']}\t403={record['bad_403_events']}\tlast={record['last_seen_iso']}")
+    print(f"{record['node']}\t{record['state']}\tgood={record['good_events']}\t503={record['bad_503_events']}\t403={record['bad_403_events']}\tpcap={record['pcap_events']}\terrlog={record['error_log_events']}\tlast={record['last_seen_iso']}")

@@ -1,7 +1,8 @@
+#!/usr/bin/env bash
+
 # save this file to
 # /usr/local/sbin/freepbx-tpg-node-health-update
 
-#!/usr/bin/env bash
 set -euo pipefail
 
 ENV_FILE="${ENV_FILE:-/etc/freepbx-wanip-hosts/freepbx-tpg-node-health.env}"

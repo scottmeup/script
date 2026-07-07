@@ -32,6 +32,7 @@ ASTERISK_RESTART_WAIT_TIMEOUT_SECONDS="${ASTERISK_RESTART_WAIT_TIMEOUT_SECONDS:-
 REGISTRATION_RECOVER="${REGISTRATION_RECOVER:-/usr/local/sbin/freepbx-wanip-registration-recover}"
 
 LOCK_FILE="/run/freepbx-tpg-node-health-update.lock"
+RECOVERY_LOCK_FILE="/run/freepbx-wanip-registration-recover.lock"
 LAST_WORKING_HOSTS="$STATE_DIR/hosts.last-known-working"
 LAST_WORKING_NODES="$STATE_DIR/nodes.last-known-working"
 CURRENT_HEALTH="$STATE_DIR/node-health.tsv"
@@ -45,6 +46,17 @@ mkdir -p "$STATE_DIR"
 
 log_msg() {
   logger -t freepbx-tpg-node-health "$1"
+}
+
+registration_recovery_active() {
+  ! ( flock -n 98 ) 98>"$RECOVERY_LOCK_FILE"
+}
+
+check_no_recovery_active_or_defer() {
+  if registration_recovery_active; then
+    log_msg "registration recovery already running; deferring node health update"
+    exit 75
+  fi
 }
 
 trunk_call_active() {
@@ -257,12 +269,22 @@ apply_nodes_to_hosts() {
 }
 
 run_non_disruptive_recovery() {
+  if registration_recovery_active; then
+    log_msg "registration recovery already running; not starting another recovery"
+    return 75
+  fi
+
   ASTERISK_RESTART_ON_REGISTRATION_FAILURE=no "$REGISTRATION_RECOVER"
 }
 
 refresh_asterisk_if_enabled() {
   if [ "$REFRESH_ASTERISK_AFTER_NODE_CHANGE" != "yes" ]; then
     return 0
+  fi
+
+  if registration_recovery_active; then
+    log_msg "registration recovery already running; not restarting Asterisk"
+    return 75
   fi
 
   if ! wait_for_no_trunk_calls; then
@@ -276,6 +298,11 @@ refresh_asterisk_if_enabled() {
 }
 
 validate_after_change() {
+  if registration_recovery_active; then
+    log_msg "registration recovery already running; validation deferred"
+    return 75
+  fi
+
   if run_non_disruptive_recovery; then
     if refresh_asterisk_if_enabled; then
       run_non_disruptive_recovery
@@ -283,6 +310,12 @@ validate_after_change() {
     fi
 
     return 0
+  fi
+
+  rc="$?"
+
+  if [ "$rc" -eq 75 ]; then
+    return 75
   fi
 
   if refresh_asterisk_if_enabled; then
@@ -303,6 +336,11 @@ apply_and_validate_candidate() {
   label="$1"
   nodes_file="$2"
 
+  if registration_recovery_active; then
+    log_msg "registration recovery already running; not applying $label nodes"
+    return 75
+  fi
+
   backup_hosts
   apply_nodes_to_hosts "$nodes_file"
 
@@ -314,11 +352,23 @@ apply_and_validate_candidate() {
     return 0
   fi
 
+  rc="$?"
+
+  if [ "$rc" -eq 75 ]; then
+    log_msg "$label nodes validation deferred because registration recovery is already running"
+    return 75
+  fi
+
   log_msg "$label nodes failed registration validation"
   return 1
 }
 
 restore_last_known_working() {
+  if registration_recovery_active; then
+    log_msg "registration recovery already running; not restoring last known working hosts"
+    return 75
+  fi
+
   if [ ! -r "$LAST_WORKING_HOSTS" ] || [ ! -r "$LAST_WORKING_NODES" ]; then
     return 1
   fi
@@ -330,6 +380,8 @@ restore_last_known_working() {
 
   validate_after_change
 }
+
+check_no_recovery_active_or_defer
 
 dns_nodes_file="$(mktemp)"
 health_file="$(mktemp)"
@@ -368,8 +420,19 @@ if nodes_equal_current "$candidate_file"; then
   exit 0
 fi
 
+if registration_recovery_active; then
+  log_msg "registration recovery already running; not changing node set"
+  exit 75
+fi
+
 if apply_and_validate_candidate "candidate" "$candidate_file"; then
   exit 0
+fi
+
+rc="$?"
+
+if [ "$rc" -eq 75 ]; then
+  exit 75
 fi
 
 if restore_last_known_working; then
@@ -377,10 +440,22 @@ if restore_last_known_working; then
   exit 0
 fi
 
+rc="$?"
+
+if [ "$rc" -eq 75 ]; then
+  exit 75
+fi
+
 cp -a "$dns_nodes_file" "$fallback_file"
 
 if apply_and_validate_candidate "live DNS fallback" "$fallback_file"; then
   exit 0
+fi
+
+rc="$?"
+
+if [ "$rc" -eq 75 ]; then
+  exit 75
 fi
 
 log_msg "live DNS fallback applied but registration validation failed; leaving live DNS fallback in place"

@@ -13,23 +13,25 @@ fi
 . "$ENV_FILE"
 
 TRUNK_NAME="${TRUNK_NAME:?TRUNK_NAME is required}"
+FORCE_INITIAL_REGISTER="${FORCE_INITIAL_REGISTER:-no}"
 REGISTER_STATUS_CHECK_INTERVAL_SECONDS="${REGISTER_STATUS_CHECK_INTERVAL_SECONDS:-1}"
-REGISTER_COMMAND_INTERVAL_SECONDS="${REGISTER_COMMAND_INTERVAL_SECONDS:-10}"
+REGISTER_RETRY_INITIAL_SECONDS="${REGISTER_RETRY_INITIAL_SECONDS:-30}"
+REGISTER_RETRY_BACKOFF_MULTIPLIER="${REGISTER_RETRY_BACKOFF_MULTIPLIER:-2}"
+REGISTER_RETRY_MAX_SECONDS="${REGISTER_RETRY_MAX_SECONDS:-300}"
+REGISTER_RETRY_JITTER_MIN_SECONDS="${REGISTER_RETRY_JITTER_MIN_SECONDS:-15}"
+REGISTER_RETRY_JITTER_MAX_SECONDS="${REGISTER_RETRY_JITTER_MAX_SECONDS:-45}"
 REGISTER_FAILURE_TIMEOUT_SECONDS="${REGISTER_FAILURE_TIMEOUT_SECONDS:-180}"
 REGISTER_STABLE_CHECKS="${REGISTER_STABLE_CHECKS:-5}"
 ASTERISK_RESTART_ON_REGISTRATION_FAILURE="${ASTERISK_RESTART_ON_REGISTRATION_FAILURE:-yes}"
 ASTERISK_RESTART_CALL_CHECK_INTERVAL_SECONDS="${ASTERISK_RESTART_CALL_CHECK_INTERVAL_SECONDS:-5}"
 ASTERISK_RESTART_WAIT_TIMEOUT_SECONDS="${ASTERISK_RESTART_WAIT_TIMEOUT_SECONDS:-0}"
 ASTERISK_RESTART_REGISTRATION_TIMEOUT_SECONDS="${ASTERISK_RESTART_REGISTRATION_TIMEOUT_SECONDS:-180}"
-FORCE_INITIAL_REGISTER="${FORCE_INITIAL_REGISTER:-no}"
-
 
 exec 8>/run/freepbx-wanip-registration-recover.lock
 if ! flock -n 8; then
   logger -t freepbx-wanip-recovery "another registration recovery is already running"
   exit 75
 fi
-
 
 log_msg() {
   logger -t freepbx-wanip-recovery "$1"
@@ -77,18 +79,60 @@ wait_for_no_trunk_calls() {
   return 0
 }
 
+bounded_jitter() {
+  min_value="$1"
+  max_value="$2"
+
+  if [ "$max_value" -lt "$min_value" ]; then
+    printf '%s\n' 0
+    return 0
+  fi
+
+  span="$((max_value - min_value + 1))"
+  printf '%s\n' "$((min_value + RANDOM % span))"
+}
+
+next_retry_delay() {
+  base_delay="$1"
+  jitter="$(bounded_jitter "$REGISTER_RETRY_JITTER_MIN_SECONDS" "$REGISTER_RETRY_JITTER_MAX_SECONDS")"
+  delay="$((base_delay + jitter))"
+
+  if [ "$delay" -gt "$REGISTER_RETRY_MAX_SECONDS" ]; then
+    delay="$REGISTER_RETRY_MAX_SECONDS"
+  fi
+
+  printf '%s\n' "$delay"
+}
+
+next_retry_base() {
+  base_delay="$1"
+  next_base="$((base_delay * REGISTER_RETRY_BACKOFF_MULTIPLIER))"
+
+  if [ "$next_base" -lt 1 ]; then
+    next_base="$REGISTER_RETRY_INITIAL_SECONDS"
+  fi
+
+  if [ "$next_base" -gt "$REGISTER_RETRY_MAX_SECONDS" ]; then
+    next_base="$REGISTER_RETRY_MAX_SECONDS"
+  fi
+
+  printf '%s\n' "$next_base"
+}
+
 registration_retry_loop() {
   timeout_seconds="$1"
   start_epoch="$(date +%s)"
-  last_register_epoch=0
   stable_checks=0
-
+  retry_base="$REGISTER_RETRY_INITIAL_SECONDS"
+  next_register_epoch=0
 
   if [ "$FORCE_INITIAL_REGISTER" = "yes" ]; then
     log_msg "force initial explicit register for $TRUNK_NAME"
     send_register
-    last_register_epoch="$(date +%s)"
-    stable_checks=0
+    delay="$(next_retry_delay "$retry_base")"
+    retry_base="$(next_retry_base "$retry_base")"
+    next_register_epoch="$(($(date +%s) + delay))"
+    log_msg "next explicit register for $TRUNK_NAME not before ${delay}s"
     sleep "$REGISTER_STATUS_CHECK_INTERVAL_SECONDS"
   fi
 
@@ -120,14 +164,17 @@ registration_retry_loop() {
     fi
 
     stable_checks=0
-    since_last_register="$((now_epoch - last_register_epoch))"
 
-    if [ "$last_register_epoch" -eq 0 ] || [ "$since_last_register" -ge "$REGISTER_COMMAND_INTERVAL_SECONDS" ]; then
+    if [ "$next_register_epoch" -eq 0 ] || [ "$now_epoch" -ge "$next_register_epoch" ]; then
       log_msg "sending explicit register for $TRUNK_NAME"
       send_register
-      last_register_epoch="$(date +%s)"
+      delay="$(next_retry_delay "$retry_base")"
+      retry_base="$(next_retry_base "$retry_base")"
+      next_register_epoch="$(($(date +%s) + delay))"
+      log_msg "next explicit register for $TRUNK_NAME not before ${delay}s"
     else
-      log_msg "$TRUNK_NAME is not Registered; checking again in ${REGISTER_STATUS_CHECK_INTERVAL_SECONDS}s"
+      remaining="$((next_register_epoch - now_epoch))"
+      log_msg "$TRUNK_NAME is not Registered; next explicit register allowed in ${remaining}s"
     fi
 
     sleep "$REGISTER_STATUS_CHECK_INTERVAL_SECONDS"

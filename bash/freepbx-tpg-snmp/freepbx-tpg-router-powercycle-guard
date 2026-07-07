@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# install file to 
+# /usr/local/sbin/freepbx-tpg-router-powercycle-guard
+
 set -euo pipefail
 
 ENV_FILE="${ENV_FILE:-/etc/freepbx-wanip-hosts/freepbx-tpg-router-powercycle.env}"

@@ -1,3 +1,6 @@
+# install file to 
+# /etc/systemd/system/freepbx-tpg-router-powercycle-guard.service
+
 [Unit]
 Description=Guarded TPG router power cycle after persistent SIP REGISTER 503 failures
 After=network-online.target asterisk.service

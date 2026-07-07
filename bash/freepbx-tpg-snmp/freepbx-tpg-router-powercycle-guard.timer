@@ -1,3 +1,6 @@
+# install file to
+# /etc/systemd/system/freepbx-tpg-router-powercycle-guard.timer
+
 [Unit]
 Description=Run guarded TPG router power cycle check periodically
 

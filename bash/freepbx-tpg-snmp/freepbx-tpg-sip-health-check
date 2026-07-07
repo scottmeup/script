@@ -41,7 +41,9 @@ LOOKBACK_SECONDS = int(cfg.get('LOOKBACK_SECONDS', '3600'))
 TCPDUMP = cfg.get('TCPDUMP', '/usr/bin/tcpdump')
 MIN_GOOD_EVENTS = int(cfg.get('MIN_GOOD_EVENTS', '1'))
 BAD_503_THRESHOLD = int(cfg.get('BAD_503_THRESHOLD', '2'))
-BAD_403_THRESHOLD = int(cfg.get('BAD_403_THRESHOLD', '1'))
+BAD_403_THRESHOLD = int(cfg.get('BAD_403_THRESHOLD', '2'))
+SUSPECT_503_THRESHOLD = int(cfg.get('SUSPECT_503_THRESHOLD', '1'))
+SUSPECT_403_THRESHOLD = int(cfg.get('SUSPECT_403_THRESHOLD', '1'))
 STALE_AFTER_SECONDS = int(cfg.get('STALE_AFTER_SECONDS', str(LOOKBACK_SECONDS)))
 DNS_TIMEOUT_SECONDS = int(cfg.get('DNS_TIMEOUT_SECONDS', '5'))
 
@@ -82,7 +84,6 @@ if not TPG_NODES:
     sys.exit(20)
 
 nodes = set(TPG_NODES)
-
 packet_re = re.compile(r'^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(?:(?:\S+)\s+)?(?:(?:In|Out)\s+)?IP\s+([^\s]+)\.5060\s+>\s+([^\s]+)\.5060:\s+SIP(?::\s*(.*))?$', re.IGNORECASE)
 status_re = re.compile(r'SIP/2\.0\s+(\d{3})\s+([^\r\n]+)')
 cseq_re = re.compile(r'^CSeq:\s*\d+\s+([A-Z]+)', re.IGNORECASE)
@@ -256,16 +257,16 @@ def classify(bucket):
     age = now.timestamp() - bucket['last_seen_epoch'] if bucket['last_seen_epoch'] else None
     if bucket['last_seen_epoch'] == 0 or (age is not None and age > STALE_AFTER_SECONDS):
         return 'unknown', good, bad503, bad403
-    if bad503 >= BAD_503_THRESHOLD and good == 0:
-        return 'bad_503', good, bad503, bad403
-    if bad403 >= BAD_403_THRESHOLD and good == 0:
-        return 'bad_403', good, bad503, bad403
     if good >= MIN_GOOD_EVENTS and bad503 == 0 and bad403 == 0:
         return 'healthy', good, bad503, bad403
     if good >= MIN_GOOD_EVENTS and (bad503 > 0 or bad403 > 0):
         return 'mixed', good, bad503, bad403
-    if bad503 > 0 or bad403 > 0:
-        return 'degraded', good, bad503, bad403
+    if bad503 >= BAD_503_THRESHOLD and good == 0:
+        return 'bad_503', good, bad503, bad403
+    if bad403 >= BAD_403_THRESHOLD and good == 0:
+        return 'bad_403', good, bad503, bad403
+    if (bad503 >= SUSPECT_503_THRESHOLD or bad403 >= SUSPECT_403_THRESHOLD) and good == 0:
+        return 'suspect', good, bad503, bad403
     return 'seen_no_signal', good, bad503, bad403
 
 records = []

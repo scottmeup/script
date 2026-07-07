@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# install file to
+# install file to 
 # /usr/local/sbin/freepbx-tpg-sip-health-policy-watch
+
 set -euo pipefail
 
 WATCH_DIR="${WATCH_DIR:-/var/log/tpg-sip-pcap}"
 POLICY_SCRIPT="${POLICY_SCRIPT:-/usr/local/sbin/freepbx-tpg-sip-health-policy}"
+OUTBOUND_RECOVERY_SCRIPT="${OUTBOUND_RECOVERY_SCRIPT:-/usr/local/sbin/freepbx-tpg-outbound-failure-recover}"
 INOTIFYWAIT="${INOTIFYWAIT:-/usr/bin/inotifywait}"
 LOG_TAG="freepbx-tpg-sip-health-policy-watch"
 
@@ -27,7 +29,6 @@ logger -t "$LOG_TAG" "watching $WATCH_DIR for completed pcap files"
 
 "$INOTIFYWAIT" -m -e close_write,moved_to --format '%e %w%f' "$WATCH_DIR" | while IFS= read -r event_line; do
   file_path="${event_line#* }"
-
   case "$file_path" in
     *.pcap)
       logger -t "$LOG_TAG" "completed pcap detected: $file_path"
@@ -36,6 +37,14 @@ logger -t "$LOG_TAG" "watching $WATCH_DIR for completed pcap files"
       else
         rc="$?"
         logger -t "$LOG_TAG" "policy exited with status $rc after pcap event"
+      fi
+      if [ -x "$OUTBOUND_RECOVERY_SCRIPT" ]; then
+        if "$OUTBOUND_RECOVERY_SCRIPT"; then
+          logger -t "$LOG_TAG" "outbound recovery completed after pcap event"
+        else
+          rc="$?"
+          logger -t "$LOG_TAG" "outbound recovery exited with status $rc after pcap event"
+        fi
       fi
       ;;
     *)

@@ -1,0 +1,10 @@
+# save this file to 
+# /etc/systemd/system/freepbx-tpg-node-health-update.service
+[Unit]
+Description=Update TPG SIP node hosts entries based on node health
+After=network-online.target asterisk.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/freepbx-tpg-node-health-update

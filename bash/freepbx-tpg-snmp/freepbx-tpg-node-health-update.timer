@@ -1,0 +1,13 @@
+# save this file to
+# /etc/systemd/system/freepbx-tpg-node-health-update.timer
+[Unit]
+Description=Run TPG SIP node health update periodically
+
+[Timer]
+OnBootSec=120
+OnUnitActiveSec=300
+AccuracySec=30
+Unit=freepbx-tpg-node-health-update.service
+
+[Install]
+WantedBy=timers.target

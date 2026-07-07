@@ -7,7 +7,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/tcpdump -ni any -s0 -G 300 -W 24 -w /var/log/tpg-sip-pcap/tpg-sip-%%Y%%m%%d-%%H%%M%%S.pcap "udp port 5060"
+ExecStart=/usr/bin/tcpdump -ni any -s0 -G 10 -W 720 -w /var/log/tpg-sip-pcap/tpg-sip-%%Y%%m%%d-%%H%%M%%S.pcap "udp port 5060"
 Restart=always
 RestartSec=5
 

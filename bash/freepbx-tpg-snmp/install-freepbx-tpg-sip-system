@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SRC_DIR="${SOURCE_DIR:-$(pwd -P)}"
+MANIFEST_FILE="${MANIFEST_FILE:-$SRC_DIR/freepbx-tpg-sip-system-manifest.txt}"
+ETC_DIR="/etc/freepbx-wanip-hosts"
+SBIN_DIR="/usr/local/sbin"
+SYSTEMD_DIR="/etc/systemd/system"
+PCAP_DIR="/var/log/tpg-sip-pcap"
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "ERROR: run as root" >&2
+  exit 1
+fi
+
+if [ ! -r "$MANIFEST_FILE" ]; then
+  echo "ERROR: manifest not readable: $MANIFEST_FILE" >&2
+  exit 19
+fi
+
+required_files=()
+while IFS= read -r raw_line || [ -n "$raw_line" ]; do
+  line="$(printf '%s' "$raw_line" | sed 's/[[:space:]]*#.*$//' | xargs)"
+  [ -n "$line" ] || continue
+  required_files+=("$line")
+done < "$MANIFEST_FILE"
+
+missing=()
+for file in "${required_files[@]}"; do
+  if [ ! -f "$SRC_DIR/$file" ]; then
+    missing+=("$file")
+  fi
+done
+
+if [ "${#missing[@]}" -gt 0 ]; then
+  echo "ERROR: installation halted. Missing required files in $SRC_DIR:" >&2
+  for file in "${missing[@]}"; do
+    echo "  $file" >&2
+  done
+  exit 20
+fi
+
+mkdir -p "$ETC_DIR" "$SBIN_DIR" "$SYSTEMD_DIR" "$PCAP_DIR" \
+  "$ETC_DIR/tpg-sip-health-state" \
+  "$ETC_DIR/router-powercycle-state" \
+  "$ETC_DIR/tpg-node-health-state"
+
+install_script() {
+  install -o root -g root -m 750 "$SRC_DIR/$1" "$SBIN_DIR/$1"
+}
+
+install_env() {
+  install -o root -g root -m 640 "$SRC_DIR/$1" "$ETC_DIR/$1"
+}
+
+install_systemd() {
+  install -o root -g root -m 644 "$SRC_DIR/$1" "$SYSTEMD_DIR/$1"
+}
+
+for file in "${required_files[@]}"; do
+  case "$file" in
+    *.service|*.timer)
+      install_systemd "$file"
+      ;;
+    *.env)
+      install_env "$file"
+      ;;
+    *)
+      install_script "$file"
+      ;;
+  esac
+done
+
+if getent group tcpdump >/dev/null; then
+  chown root:tcpdump "$PCAP_DIR"
+else
+  chown root:adm "$PCAP_DIR"
+fi
+chmod 2770 "$PCAP_DIR"
+
+bash_scripts=(
+  freepbx-wanip-hosts-update
+  freepbx-wanip-registration-recover
+  freepbx-wanip-registration-watchdog
+  freepbx-tpg-router-powercycle-guard
+  freepbx-tpg-sip-health-policy-watch
+  tpg-sip-error-monitor
+)
+
+python_scripts=(
+  freepbx-tpg-sip-health-check
+  freepbx-tpg-sip-health-policy
+)
+
+for script in "${bash_scripts[@]}"; do
+  if [ -x "$SBIN_DIR/$script" ]; then
+    bash -n "$SBIN_DIR/$script"
+  fi
+done
+
+for script in "${python_scripts[@]}"; do
+  if [ -x "$SBIN_DIR/$script" ]; then
+    python3 -m py_compile "$SBIN_DIR/$script"
+  fi
+done
+
+systemctl daemon-reload
+
+systemctl enable --now tpg-sip-pcap.service
+systemctl enable --now tpg-sip-error-monitor.service
+systemctl enable --now freepbx-wanip-hosts-update.timer
+systemctl enable --now freepbx-wanip-registration-watchdog.timer
+systemctl enable --now freepbx-tpg-router-powercycle-guard.timer
+systemctl enable --now freepbx-tpg-sip-health-check.timer
+systemctl enable --now freepbx-tpg-sip-health-policy.timer
+systemctl enable --now freepbx-tpg-sip-health-policy-watch.service
+
+systemctl disable --now freepbx-tpg-node-health-update.timer >/dev/null 2>&1 || true
+
+if [ -x "$SBIN_DIR/freepbx-tpg-sip-health-check" ]; then
+  "$SBIN_DIR/freepbx-tpg-sip-health-check" >/dev/null || true
+fi
+
+if [ -x "$SBIN_DIR/freepbx-tpg-sip-health-policy" ]; then
+  "$SBIN_DIR/freepbx-tpg-sip-health-policy" >/dev/null || true
+fi
+
+if [ -x "$SBIN_DIR/freepbx-tpg-router-powercycle-guard" ]; then
+  "$SBIN_DIR/freepbx-tpg-router-powercycle-guard" >/dev/null || true
+fi
+
+cat <<REPORT
+Install completed.
+
+Source directory:
+  $SRC_DIR
+
+Manifest:
+  $MANIFEST_FILE
+
+Installed directories:
+  $SBIN_DIR
+  $ETC_DIR
+  $SYSTEMD_DIR
+  $PCAP_DIR
+
+Enabled and started:
+  tpg-sip-pcap.service
+  tpg-sip-error-monitor.service
+  freepbx-wanip-hosts-update.timer
+  freepbx-wanip-registration-watchdog.timer
+  freepbx-tpg-router-powercycle-guard.timer
+  freepbx-tpg-sip-health-check.timer
+  freepbx-tpg-sip-health-policy.timer
+  freepbx-tpg-sip-health-policy-watch.service
+
+Disabled if present:
+  freepbx-tpg-node-health-update.timer
+
+No environment values were prompted for or modified. The .env files were installed as-is.
+
+Recommended checks:
+  systemctl status tpg-sip-pcap.service -l --no-pager
+  systemctl status tpg-sip-error-monitor.service -l --no-pager
+  systemctl status freepbx-wanip-hosts-update.timer -l --no-pager
+  systemctl status freepbx-wanip-registration-watchdog.timer -l --no-pager
+  systemctl status freepbx-tpg-router-powercycle-guard.timer -l --no-pager
+  systemctl status freepbx-tpg-sip-health-check.timer -l --no-pager
+  systemctl status freepbx-tpg-sip-health-policy.timer -l --no-pager
+  systemctl status freepbx-tpg-sip-health-policy-watch.service -l --no-pager
+  cat /etc/freepbx-wanip-hosts/tpg-sip-health-state/sip-health-summary.txt
+  grep -n "uni-v1.tpg.com.au" /etc/hosts
+REPORT

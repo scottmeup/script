@@ -91,11 +91,20 @@ request_re = re.compile(r'^(INVITE|REGISTER|OPTIONS|ACK|CANCEL|BYE)\s+', re.IGNO
 error_log_re = re.compile(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})([+-]\d{4}).*node=([0-9.]+).*status="SIP/2\.0\s+(\d{3})\s+([^"]+)".*cseq="\d+\s+([A-Z]+)"', re.IGNORECASE)
 
 def clean_ip(endpoint):
-    ip = endpoint.rsplit('.', 1)[0]
+    value = endpoint.strip()
     try:
-        return str(ipaddress.ip_address(ip))
+        return str(ipaddress.ip_address(value))
     except ValueError:
-        return ip
+        pass
+
+    if value.count('.') >= 4:
+        candidate = value.rsplit('.', 1)[0]
+        try:
+            return str(ipaddress.ip_address(candidate))
+        except ValueError:
+            return candidate
+
+    return value
 
 def event_bucket():
     return {

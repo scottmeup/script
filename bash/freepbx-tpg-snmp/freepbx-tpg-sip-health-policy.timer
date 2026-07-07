@@ -2,12 +2,12 @@
 # /etc/systemd/system/freepbx-tpg-sip-health-policy.timer
 
 [Unit]
-Description=Run TPG SIP health /etc/hosts policy periodically
+Description=Run TPG SIP health /etc/hosts policy fallback periodically
 
 [Timer]
-OnBootSec=240
-OnUnitActiveSec=60
-AccuracySec=15
+OnBootSec=120
+OnUnitActiveSec=300
+AccuracySec=30
 Unit=freepbx-tpg-sip-health-policy.service
 
 [Install]

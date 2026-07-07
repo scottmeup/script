@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# install file to
+# /usr/local/sbin/freepbx-tpg-sip-health-policy-watch
+set -euo pipefail
+
+WATCH_DIR="${WATCH_DIR:-/var/log/tpg-sip-pcap}"
+POLICY_SCRIPT="${POLICY_SCRIPT:-/usr/local/sbin/freepbx-tpg-sip-health-policy}"
+INOTIFYWAIT="${INOTIFYWAIT:-/usr/bin/inotifywait}"
+LOG_TAG="freepbx-tpg-sip-health-policy-watch"
+
+if [ ! -x "$INOTIFYWAIT" ]; then
+  logger -t "$LOG_TAG" "inotifywait not executable: $INOTIFYWAIT"
+  exit 10
+fi
+
+if [ ! -d "$WATCH_DIR" ]; then
+  logger -t "$LOG_TAG" "watch directory does not exist: $WATCH_DIR"
+  exit 11
+fi
+
+if [ ! -x "$POLICY_SCRIPT" ]; then
+  logger -t "$LOG_TAG" "policy script not executable: $POLICY_SCRIPT"
+  exit 12
+fi
+
+logger -t "$LOG_TAG" "watching $WATCH_DIR for completed pcap files"
+
+"$INOTIFYWAIT" -m -e close_write,moved_to --format '%e %w%f' "$WATCH_DIR" | while IFS= read -r event_line; do
+  file_path="${event_line#* }"
+
+  case "$file_path" in
+    *.pcap)
+      logger -t "$LOG_TAG" "completed pcap detected: $file_path"
+      if "$POLICY_SCRIPT"; then
+        logger -t "$LOG_TAG" "policy completed after pcap event"
+      else
+        rc="$?"
+        logger -t "$LOG_TAG" "policy exited with status $rc after pcap event"
+      fi
+      ;;
+    *)
+      :
+      ;;
+  esac
+done

@@ -1,0 +1,11 @@
+# install file to
+# /etc/systemd/system/freepbx-tpg-sip-health-check.service
+
+[Unit]
+Description=Build passive SIP-response health table for TPG nodes
+After=network-online.target tpg-sip-pcap.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/freepbx-tpg-sip-health-check

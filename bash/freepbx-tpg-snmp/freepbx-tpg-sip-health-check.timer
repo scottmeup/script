@@ -1,0 +1,14 @@
+# install file to
+# /etc/systemd/system/freepbx-tpg-sip-health-check.timer
+
+[Unit]
+Description=Run passive TPG SIP-response health check periodically
+
+[Timer]
+OnBootSec=180
+OnUnitActiveSec=60
+AccuracySec=15
+Unit=freepbx-tpg-sip-health-check.service
+
+[Install]
+WantedBy=timers.target

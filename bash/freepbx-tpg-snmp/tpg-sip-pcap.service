@@ -1,0 +1,15 @@
+# install to
+# /etc/systemd/system/tpg-sip-pcap.service
+[Unit]
+Description=Rotating packet capture for TPG SIP signalling
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/tcpdump -ni any -s0 -G 300 -W 24 -w /var/log/tpg-sip-pcap/tpg-sip-%%Y%%m%%d-%%H%%M%%S.pcap "udp port 5060"
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

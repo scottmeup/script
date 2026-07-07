@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # install file to
 # /usr/local/sbin/freepbx-tpg-sip-health-check
+# then run
+# python3 -m py_compile /usr/local/sbin/freepbx-tpg-sip-health-check
 
 import datetime as dt
 import glob
@@ -8,9 +10,9 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
-from collections import defaultdict
 
 ENV_FILE = os.environ.get('ENV_FILE', '/etc/freepbx-wanip-hosts/freepbx-tpg-sip-health.env')
 
@@ -30,7 +32,8 @@ if not os.path.exists(ENV_FILE):
     sys.exit(10)
 
 cfg = load_env(ENV_FILE)
-TPG_NODES = [x.strip() for x in cfg.get('TPG_NODES', '172.26.0.33 172.26.0.34 172.26.0.81 172.26.0.82').replace(',', ' ').split() if x.strip()]
+TPG_HOST = cfg.get('TPG_HOST', 'uni-v1.tpg.com.au')
+DNS_SERVER = cfg.get('DNS_SERVER', '').strip()
 PCAP_DIR = cfg.get('PCAP_DIR', '/var/log/tpg-sip-pcap')
 STATE_DIR = cfg.get('STATE_DIR', '/etc/freepbx-wanip-hosts/tpg-sip-health-state')
 LOOKBACK_SECONDS = int(cfg.get('LOOKBACK_SECONDS', '3600'))
@@ -39,16 +42,54 @@ MIN_GOOD_EVENTS = int(cfg.get('MIN_GOOD_EVENTS', '1'))
 BAD_503_THRESHOLD = int(cfg.get('BAD_503_THRESHOLD', '2'))
 BAD_403_THRESHOLD = int(cfg.get('BAD_403_THRESHOLD', '2'))
 STALE_AFTER_SECONDS = int(cfg.get('STALE_AFTER_SECONDS', str(LOOKBACK_SECONDS)))
+DNS_TIMEOUT_SECONDS = int(cfg.get('DNS_TIMEOUT_SECONDS', '5'))
 
 os.makedirs(STATE_DIR, exist_ok=True)
 now = dt.datetime.now(dt.timezone.utc)
 cutoff = now.timestamp() - LOOKBACK_SECONDS
+
+def resolve_nodes(host, dns_server):
+    nodes = []
+    if dns_server:
+        try:
+            proc = subprocess.run(
+                ['dig', f'@{dns_server}', '+short', host, 'A'],
+                capture_output=True,
+                text=True,
+                timeout=DNS_TIMEOUT_SECONDS,
+            )
+            if proc.returncode == 0:
+                for line in proc.stdout.splitlines():
+                    line = line.strip()
+                    try:
+                        ipaddress.ip_address(line)
+                    except ValueError:
+                        continue
+                    if line not in nodes:
+                        nodes.append(line)
+        except Exception:
+            pass
+    if not nodes:
+        try:
+            infos = socket.getaddrinfo(host, 5060, socket.AF_INET, socket.SOCK_DGRAM)
+            for info in infos:
+                ip = info[4][0]
+                if ip not in nodes:
+                    nodes.append(ip)
+        except Exception:
+            pass
+    return sorted(nodes)
+
+TPG_NODES = resolve_nodes(TPG_HOST, DNS_SERVER)
+if not TPG_NODES:
+    print(f'could not resolve any A records for {TPG_HOST}', file=sys.stderr)
+    sys.exit(20)
+
 nodes = set(TPG_NODES)
 
 packet_re = re.compile(r'^\S+\s+\S+\s+IP\s+([^\s]+)\.5060\s+>\s+([^\s]+)\.5060: SIP(?::\s*(.*))?$')
 status_re = re.compile(r'SIP/2\.0\s+(\d{3})\s+(.*)')
 cseq_re = re.compile(r'^CSeq:\s*\d+\s+([A-Z]+)', re.IGNORECASE)
-callid_re = re.compile(r'^Call-ID:\s*(.+)', re.IGNORECASE)
 request_re = re.compile(r'^(INVITE|REGISTER|OPTIONS|ACK|CANCEL|BYE)\s+', re.IGNORECASE)
 
 def clean_ip(endpoint):
@@ -202,9 +243,10 @@ for node in TPG_NODES:
 json_path = os.path.join(STATE_DIR, 'sip-health.json')
 tsv_path = os.path.join(STATE_DIR, 'sip-health.tsv')
 summary_path = os.path.join(STATE_DIR, 'sip-health-summary.txt')
+resolved_path = os.path.join(STATE_DIR, 'resolved-nodes.txt')
 
 with open(json_path, 'w', encoding='utf-8') as handle:
-    json.dump({'generated_at': now.isoformat(), 'lookback_seconds': LOOKBACK_SECONDS, 'records': records}, handle, indent=2, sort_keys=True)
+    json.dump({'generated_at': now.isoformat(), 'host': TPG_HOST, 'resolved_nodes': TPG_NODES, 'lookback_seconds': LOOKBACK_SECONDS, 'records': records}, handle, indent=2, sort_keys=True)
 
 columns = ['node', 'state', 'good_events', 'bad_503_events', 'bad_403_events', 'register_200', 'register_401_407', 'invite_407', 'invite_180_183', 'invite_200', 'inbound_invite', 'register_503', 'invite_503', 'invite_403', 'last_seen_iso', 'last_status', 'last_cseq_method']
 with open(tsv_path, 'w', encoding='utf-8') as handle:
@@ -213,8 +255,16 @@ with open(tsv_path, 'w', encoding='utf-8') as handle:
         handle.write('\t'.join(str(record.get(col, '')) for col in columns) + '\n')
 
 with open(summary_path, 'w', encoding='utf-8') as handle:
+    handle.write(f'host={TPG_HOST}\n')
+    handle.write(f'resolved_nodes={" ".join(TPG_NODES)}\n')
     for record in records:
         handle.write(f"{record['node']} {record['state']} good={record['good_events']} 503={record['bad_503_events']} 403={record['bad_403_events']} last={record['last_seen_iso']} status={record['last_status']} cseq={record['last_cseq_method']}\n")
 
+with open(resolved_path, 'w', encoding='utf-8') as handle:
+    for node in TPG_NODES:
+        handle.write(node + '\n')
+
+print(f'host={TPG_HOST}')
+print(f'resolved_nodes={" ".join(TPG_NODES)}')
 for record in records:
     print(f"{record['node']}\t{record['state']}\tgood={record['good_events']}\t503={record['bad_503_events']}\t403={record['bad_403_events']}\tlast={record['last_seen_iso']}")

@@ -4,6 +4,8 @@
 
 import datetime as dt
 import fcntl
+import glob
+import json
 import os
 import re
 import subprocess
@@ -35,15 +37,21 @@ cfg = load_env(ENV_FILE)
 TRUNK_NAME = cfg.get('TRUNK_NAME', 'TPG-VoIP')
 SIP_ERROR_LOG = cfg.get('SIP_ERROR_LOG', '/var/log/tpg-sip-node-errors.log')
 STATE_DIR = Path(cfg.get('STATE_DIR', '/etc/freepbx-wanip-hosts/outbound-failure-state'))
+PCAP_DIR = cfg.get('PCAP_DIR', '/var/log/tpg-sip-pcap')
+SIP_HEALTH_JSON = cfg.get('SIP_HEALTH_JSON', '/etc/freepbx-wanip-hosts/tpg-sip-health-state/sip-health.json')
+TCPDUMP = cfg.get('TCPDUMP', '/usr/bin/tcpdump')
 WINDOW_SECONDS = int(cfg.get('OUTBOUND_FAILURE_WINDOW_SECONDS', '600'))
 MIN_COUNT = int(cfg.get('OUTBOUND_FAILURE_MIN_COUNT', '2'))
 MIN_DISTINCT_CALLIDS = int(cfg.get('OUTBOUND_FAILURE_MIN_DISTINCT_CALLIDS', '2'))
 FAILURE_CODES = set(cfg.get('OUTBOUND_FAILURE_CODES', '403 503 603').split())
-REGISTER_RECOVERY_COOLDOWN_SECONDS = int(cfg.get('REGISTER_RECOVERY_COOLDOWN_SECONDS', '900'))
+SUCCESS_WINDOW_SECONDS = int(cfg.get('OUTBOUND_SUCCESS_WINDOW_SECONDS', str(WINDOW_SECONDS)))
+SUCCESS_CODES = set(cfg.get('OUTBOUND_SUCCESS_CODES', '180 183 200').split())
+SUCCESS_PCAP_LOOKBACK_FILES = int(cfg.get('OUTBOUND_SUCCESS_PCAP_LOOKBACK_FILES', '180'))
+REGISTER_RECOVERY_COOLDOWN_SECONDS = int(cfg.get('REGISTER_RECOVERY_COOLDOWN_SECONDS', '300'))
 REGISTRATION_RECOVERY_SCRIPT = cfg.get('REGISTRATION_RECOVERY_SCRIPT', '/usr/local/sbin/freepbx-wanip-registration-recover')
 ROUTER_POWER_CYCLE_ENABLED = cfg.get('ROUTER_POWER_CYCLE_ENABLED', 'yes').lower() == 'yes'
 ROUTER_POWER_CYCLE_MIN_COUNT = int(cfg.get('ROUTER_POWER_CYCLE_MIN_COUNT', '4'))
-ROUTER_POWER_CYCLE_AFTER_REGISTER_RECOVERY_SECONDS = int(cfg.get('ROUTER_POWER_CYCLE_AFTER_REGISTER_RECOVERY_SECONDS', '300'))
+ROUTER_POWER_CYCLE_AFTER_FIRST_REGISTER_RECOVERY_SECONDS = int(cfg.get('ROUTER_POWER_CYCLE_AFTER_FIRST_REGISTER_RECOVERY_SECONDS', '900'))
 ROUTER_POWER_CYCLE_COOLDOWN_SECONDS = int(cfg.get('ROUTER_POWER_CYCLE_COOLDOWN_SECONDS', '3600'))
 ROUTER_IP = cfg.get('ROUTER_IP', '192.168.1.1')
 SNMP_COMMUNITY = cfg.get('SNMP_COMMUNITY', '')
@@ -58,7 +66,9 @@ LOCK_FILE = cfg.get('LOCK_FILE', '/run/freepbx-tpg-outbound-failure-recover.lock
 
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 last_register_file = STATE_DIR / 'last-register-recovery.epoch'
+first_register_file = STATE_DIR / 'first-register-recovery.epoch'
 last_power_file = STATE_DIR / 'last-router-power-cycle.epoch'
+last_success_file = STATE_DIR / 'last-outbound-success.epoch'
 
 lock_fd = os.open(LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
 try:
@@ -73,8 +83,10 @@ def epoch_file(path):
     except Exception:
         return 0
 
-def write_epoch(path):
-    path.write_text(str(int(time.time())) + '\n', encoding='utf-8')
+def write_epoch(path, value=None):
+    if value is None:
+        value = int(time.time())
+    path.write_text(str(int(value)) + '\n', encoding='utf-8')
 
 def active_trunk_call():
     result = subprocess.run(['asterisk', '-rx', 'core show channels concise'], capture_output=True, text=True)
@@ -110,6 +122,85 @@ def recent_failures():
                 events.append({'ts': ts, 'node': match.group(3), 'code': code, 'reason': match.group(5), 'callid': match.group(6)})
     return events
 
+def resolved_nodes():
+    try:
+        with open(SIP_HEALTH_JSON, 'r', encoding='utf-8') as handle:
+            data = json.load(handle)
+        nodes = data.get('resolved_nodes') or []
+        return {str(node) for node in nodes}
+    except Exception:
+        return set()
+
+def clean_ip(endpoint):
+    value = endpoint.strip()
+    if value.count('.') >= 4:
+        return value.rsplit('.', 1)[0]
+    return value
+
+def recent_success_epoch_from_pcaps():
+    nodes = resolved_nodes()
+    if not nodes:
+        return 0
+    now = dt.datetime.now(dt.timezone.utc).timestamp()
+    cutoff = now - SUCCESS_WINDOW_SECONDS
+    pcaps = []
+    for path in glob.glob(os.path.join(PCAP_DIR, '*.pcap')):
+        try:
+            if os.path.getmtime(path) >= cutoff - 30:
+                pcaps.append(path)
+        except OSError:
+            pass
+    pcaps.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    pcaps = pcaps[:SUCCESS_PCAP_LOOKBACK_FILES]
+    packet_re = re.compile(r'^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(?:(?:\S+)\s+)?(?:(?:In|Out)\s+)?IP\s+([^\s]+)\.5060\s+>\s+([^\s]+)\.5060:\s+SIP(?::\s*(.*))?$', re.IGNORECASE)
+    status_re = re.compile(r'SIP/2\.0\s+(\d{3})\s+([^\r\n]+)')
+    cseq_re = re.compile(r'^CSeq:\s*\d+\s+([A-Z]+)', re.IGNORECASE)
+    best = 0
+    for pcap in pcaps:
+        proc = subprocess.run([TCPDUMP, '-nn', '-tttt', '-r', pcap, '-A', 'udp port 5060'], capture_output=True, text=True, errors='ignore')
+        if proc.returncode not in (0, 1):
+            continue
+        current = None
+        for raw in proc.stdout.splitlines():
+            line = raw.rstrip('\n')
+            match = packet_re.match(line)
+            if match:
+                try:
+                    try:
+                        parsed = dt.datetime.strptime(f'{match.group(1)} {match.group(2)}', '%Y-%m-%d %H:%M:%S.%f')
+                    except ValueError:
+                        parsed = dt.datetime.strptime(f'{match.group(1)} {match.group(2)}', '%Y-%m-%d %H:%M:%S')
+                    ts = parsed.replace(tzinfo=dt.datetime.now().astimezone().tzinfo).timestamp()
+                except Exception:
+                    ts = os.path.getmtime(pcap)
+                src = clean_ip(match.group(3))
+                summary = match.group(5) or ''
+                status = status_re.search(summary)
+                current = {'node': src if src in nodes else '', 'ts': ts, 'code': status.group(1) if status else '', 'method': ''}
+                continue
+            if current is None or not current['node']:
+                continue
+            status = status_re.search(line)
+            if status:
+                current['code'] = status.group(1)
+            cseq = cseq_re.match(line)
+            if cseq:
+                current['method'] = cseq.group(1).upper()
+                if current['method'] == 'INVITE' and current['code'] in SUCCESS_CODES and current['ts'] >= cutoff:
+                    best = max(best, int(current['ts']))
+    return best
+
+def recent_success_exists():
+    pcap_success = recent_success_epoch_from_pcaps()
+    stored_success = epoch_file(last_success_file)
+    best = max(pcap_success, stored_success)
+    if best:
+        write_epoch(last_success_file, best)
+    if best and int(time.time()) - best <= SUCCESS_WINDOW_SECONDS:
+        log(f'recent outbound success detected {int(time.time()) - best}s ago; router power cycle suppressed')
+        return True
+    return False
+
 def run_register_recovery(events):
     now = int(time.time())
     last = epoch_file(last_register_file)
@@ -125,7 +216,9 @@ def run_register_recovery(events):
     env['ASTERISK_RESTART_ON_REGISTRATION_FAILURE'] = 'no'
     log(f'running forced register recovery after {len(events)} outbound INVITE failures')
     result = subprocess.run([REGISTRATION_RECOVERY_SCRIPT], env=env)
-    write_epoch(last_register_file)
+    write_epoch(last_register_file, now)
+    if epoch_file(first_register_file) == 0:
+        write_epoch(first_register_file, now)
     log(f'forced register recovery exited {result.returncode}')
     return True
 
@@ -196,8 +289,15 @@ def maybe_power_cycle(events):
     if len(events) < ROUTER_POWER_CYCLE_MIN_COUNT:
         return False
     now = int(time.time())
-    last_reg = epoch_file(last_register_file)
-    if last_reg == 0 or now - last_reg < ROUTER_POWER_CYCLE_AFTER_REGISTER_RECOVERY_SECONDS:
+    first_reg = epoch_file(first_register_file)
+    if first_reg == 0:
+        return False
+    elapsed = now - first_reg
+    if elapsed < ROUTER_POWER_CYCLE_AFTER_FIRST_REGISTER_RECOVERY_SECONDS:
+        remaining = ROUTER_POWER_CYCLE_AFTER_FIRST_REGISTER_RECOVERY_SECONDS - elapsed
+        log(f'outbound failures continue but router power cycle wait has {remaining}s remaining')
+        return False
+    if recent_success_exists():
         return False
     last_power = epoch_file(last_power_file)
     if now - last_power < ROUTER_POWER_CYCLE_COOLDOWN_SECONDS:
@@ -207,7 +307,7 @@ def maybe_power_cycle(events):
     if active_trunk_call():
         log('trunk call active; router power cycle deferred')
         return False
-    if not SNMP_COMMUNITY or not TASMOTA_POWER_OFF_URL:
+    if not SNMP_COMMUNITY or SNMP_COMMUNITY == 'YOUR_CURRENT_SNMP_COMMUNITY' or not TASMOTA_POWER_OFF_URL:
         log('router power cycle requested but SNMP community or Tasmota URL is missing')
         return False
     if not wan_quiet():
@@ -215,10 +315,14 @@ def maybe_power_cycle(events):
     if active_trunk_call():
         log('trunk call active before router power cycle; deferred')
         return False
-    log(f'power cycling router after {len(events)} recent outbound INVITE failures')
+    log(f'power cycling router after {len(events)} recent outbound INVITE failures and no recent successful calls')
     result = subprocess.run(['curl', '--fail', '--silent', '--show-error', '--max-time', str(CURL_MAX_TIME_SECONDS), TASMOTA_POWER_OFF_URL])
     if result.returncode == 0:
         write_epoch(last_power_file)
+        try:
+            first_register_file.unlink()
+        except FileNotFoundError:
+            pass
         log('router power off command sent; Tasmota plug is expected to restore power automatically')
         return True
     log(f'Tasmota power command failed with exit {result.returncode}')
@@ -227,6 +331,11 @@ def maybe_power_cycle(events):
 events = recent_failures()
 callids = {event['callid'] for event in events}
 if len(events) < MIN_COUNT or len(callids) < MIN_DISTINCT_CALLIDS:
+    if recent_success_exists():
+        try:
+            first_register_file.unlink()
+        except FileNotFoundError:
+            pass
     sys.exit(0)
 
 if is_registered():

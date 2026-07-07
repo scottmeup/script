@@ -21,9 +21,15 @@ ASTERISK_RESTART_ON_REGISTRATION_FAILURE="${ASTERISK_RESTART_ON_REGISTRATION_FAI
 ASTERISK_RESTART_CALL_CHECK_INTERVAL_SECONDS="${ASTERISK_RESTART_CALL_CHECK_INTERVAL_SECONDS:-5}"
 ASTERISK_RESTART_WAIT_TIMEOUT_SECONDS="${ASTERISK_RESTART_WAIT_TIMEOUT_SECONDS:-0}"
 ASTERISK_RESTART_REGISTRATION_TIMEOUT_SECONDS="${ASTERISK_RESTART_REGISTRATION_TIMEOUT_SECONDS:-180}"
+FORCE_INITIAL_REGISTER="${FORCE_INITIAL_REGISTER:-no}"
+
 
 exec 8>/run/freepbx-wanip-registration-recover.lock
-flock -n 8 || exit 0
+if ! flock -n 8; then
+  logger -t freepbx-wanip-recovery "another registration recovery is already running"
+  exit 75
+fi
+
 
 log_msg() {
   logger -t freepbx-wanip-recovery "$1"
@@ -76,6 +82,15 @@ registration_retry_loop() {
   start_epoch="$(date +%s)"
   last_register_epoch=0
   stable_checks=0
+
+
+  if [ "$FORCE_INITIAL_REGISTER" = "yes" ]; then
+    log_msg "force initial explicit register for $TRUNK_NAME"
+    send_register
+    last_register_epoch="$(date +%s)"
+    stable_checks=0
+    sleep "$REGISTER_STATUS_CHECK_INTERVAL_SECONDS"
+  fi
 
   while true; do
     now_epoch="$(date +%s)"

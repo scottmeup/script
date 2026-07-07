@@ -1,0 +1,284 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_FILE="${ENV_FILE:-/etc/freepbx-wanip-hosts/freepbx-tpg-router-powercycle.env}"
+
+if [ ! -r "$ENV_FILE" ]; then
+  logger -t freepbx-tpg-router-powercycle "environment file not readable: $ENV_FILE"
+  exit 10
+fi
+
+. "$ENV_FILE"
+
+ROUTER_IP="${ROUTER_IP:?ROUTER_IP is required}"
+SNMP_COMMUNITY="${SNMP_COMMUNITY:?SNMP_COMMUNITY is required}"
+WAN_IFNAME="${WAN_IFNAME:?WAN_IFNAME is required}"
+TRUNK_NAME="${TRUNK_NAME:?TRUNK_NAME is required}"
+SIP_ERROR_LOG="${SIP_ERROR_LOG:-/var/log/tpg-sip-node-errors.log}"
+STATE_DIR="${STATE_DIR:-/etc/freepbx-wanip-hosts/router-powercycle-state}"
+TASMOTA_POWER_OFF_URL="${TASMOTA_POWER_OFF_URL:?TASMOTA_POWER_OFF_URL is required}"
+REGISTER_503_WINDOW_SECONDS="${REGISTER_503_WINDOW_SECONDS:-1200}"
+REGISTER_503_MIN_COUNT="${REGISTER_503_MIN_COUNT:-4}"
+ROUTER_POWER_CYCLE_COOLDOWN_SECONDS="${ROUTER_POWER_CYCLE_COOLDOWN_SECONDS:-3600}"
+WAN_QUIET_RX_KBPS="${WAN_QUIET_RX_KBPS:-256}"
+WAN_QUIET_TX_KBPS="${WAN_QUIET_TX_KBPS:-128}"
+WAN_QUIET_SAMPLE_SECONDS="${WAN_QUIET_SAMPLE_SECONDS:-30}"
+WAN_QUIET_REQUIRED_SAMPLES="${WAN_QUIET_REQUIRED_SAMPLES:-4}"
+POWER_CYCLE_ALLOWED_START_HOUR="${POWER_CYCLE_ALLOWED_START_HOUR:-0}"
+POWER_CYCLE_ALLOWED_END_HOUR="${POWER_CYCLE_ALLOWED_END_HOUR:-24}"
+CURL_MAX_TIME_SECONDS="${CURL_MAX_TIME_SECONDS:-10}"
+
+LOCK_FILE="/run/freepbx-tpg-router-powercycle.lock"
+LAST_POWER_CYCLE_FILE="$STATE_DIR/last-power-cycle.epoch"
+
+exec 9>"$LOCK_FILE"
+flock -n 9 || exit 0
+
+mkdir -p "$STATE_DIR"
+
+log_msg() {
+  logger -t freepbx-tpg-router-powercycle "$1"
+}
+
+current_hour_allowed() {
+  hour="$(date +%H)"
+  hour="$((10#$hour))"
+
+  if [ "$POWER_CYCLE_ALLOWED_START_HOUR" -eq "$POWER_CYCLE_ALLOWED_END_HOUR" ]; then
+    return 0
+  fi
+
+  if [ "$POWER_CYCLE_ALLOWED_START_HOUR" -lt "$POWER_CYCLE_ALLOWED_END_HOUR" ]; then
+    [ "$hour" -ge "$POWER_CYCLE_ALLOWED_START_HOUR" ] && [ "$hour" -lt "$POWER_CYCLE_ALLOWED_END_HOUR" ]
+    return "$?"
+  fi
+
+  [ "$hour" -ge "$POWER_CYCLE_ALLOWED_START_HOUR" ] || [ "$hour" -lt "$POWER_CYCLE_ALLOWED_END_HOUR" ]
+}
+
+cooldown_ok() {
+  now="$(date +%s)"
+
+  if [ ! -r "$LAST_POWER_CYCLE_FILE" ]; then
+    return 0
+  fi
+
+  last="$(cat "$LAST_POWER_CYCLE_FILE" 2>/dev/null || printf '0')"
+
+  case "$last" in
+    ''|*[!0-9]*) last=0 ;;
+  esac
+
+  elapsed="$((now - last))"
+
+  if [ "$elapsed" -lt "$ROUTER_POWER_CYCLE_COOLDOWN_SECONDS" ]; then
+    remaining="$((ROUTER_POWER_CYCLE_COOLDOWN_SECONDS - elapsed))"
+    log_msg "cooldown active; router power cycle not allowed for ${remaining}s"
+    return 1
+  fi
+
+  return 0
+}
+
+is_registered() {
+  asterisk -rx "pjsip show registrations" 2>/dev/null |
+    awk -v trunk="$TRUNK_NAME" '
+      index($0, trunk "/") > 0 && index($0, "Registered") > 0 {
+        found = 1
+      }
+      END {
+        exit found ? 0 : 1
+      }
+    '
+}
+
+trunk_call_active() {
+  asterisk -rx "core show channels concise" 2>/dev/null |
+    grep -F "PJSIP/${TRUNK_NAME}-" >/dev/null
+}
+
+recent_503_persistent() {
+  if [ ! -r "$SIP_ERROR_LOG" ]; then
+    log_msg "SIP error log not readable: $SIP_ERROR_LOG"
+    return 1
+  fi
+
+  python3 - "$SIP_ERROR_LOG" "$REGISTER_503_WINDOW_SECONDS" "$REGISTER_503_MIN_COUNT" <<'PY'
+import datetime
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+window = int(sys.argv[2])
+minimum = int(sys.argv[3])
+now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+cutoff = now - window
+pattern = re.compile(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})([+-]\d{4}).*status="SIP/2\.0 503 Service Unavailable".*cseq="\d+ REGISTER"')
+times = []
+
+for line in path.read_text(errors='ignore').splitlines():
+    match = pattern.search(line)
+    if not match:
+        continue
+    stamp = match.group(1) + match.group(2)
+    try:
+        dt = datetime.datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%S%z')
+    except ValueError:
+        continue
+    ts = dt.timestamp()
+    if ts >= cutoff:
+        times.append(ts)
+
+if len(times) < minimum:
+    sys.exit(1)
+
+if max(times) - min(times) < min(window * 0.75, window - 1):
+    sys.exit(1)
+
+sys.exit(0)
+PY
+}
+
+find_wan_ifindex() {
+  snmpwalk -v2c -c "$SNMP_COMMUNITY" -On "$ROUTER_IP" 1.3.6.1.2.1.2.2.1.2 2>/dev/null |
+    awk -v name="$WAN_IFNAME" '$0 ~ "STRING: " name "$" { split($1, a, "."); print a[length(a)]; found = 1 } END { exit found ? 0 : 1 }'
+}
+
+snmp_value() {
+  oid="$1"
+  snmpget -v2c -c "$SNMP_COMMUNITY" -Ovq "$ROUTER_IP" "$oid" 2>/dev/null | awk '{ print $1 }'
+}
+
+read_wan_counters() {
+  index="$1"
+  in_value="$(snmp_value "1.3.6.1.2.1.31.1.1.1.6.$index" || true)"
+  out_value="$(snmp_value "1.3.6.1.2.1.31.1.1.1.10.$index" || true)"
+
+  if ! printf '%s\n' "$in_value" | grep -Eq '^[0-9]+$'; then
+    in_value="$(snmp_value "1.3.6.1.2.1.2.2.1.10.$index" || true)"
+  fi
+
+  if ! printf '%s\n' "$out_value" | grep -Eq '^[0-9]+$'; then
+    out_value="$(snmp_value "1.3.6.1.2.1.2.2.1.16.$index" || true)"
+  fi
+
+  if ! printf '%s\n' "$in_value" | grep -Eq '^[0-9]+$'; then
+    return 1
+  fi
+
+  if ! printf '%s\n' "$out_value" | grep -Eq '^[0-9]+$'; then
+    return 1
+  fi
+
+  printf '%s %s\n' "$in_value" "$out_value"
+}
+
+wan_quiet_enough() {
+  index="$1"
+  quiet_count=0
+
+  while [ "$quiet_count" -lt "$WAN_QUIET_REQUIRED_SAMPLES" ]; do
+    if trunk_call_active; then
+      log_msg "$TRUNK_NAME trunk call active; router power cycle deferred"
+      return 1
+    fi
+
+    first="$(read_wan_counters "$index")" || {
+      log_msg "could not read initial WAN counters for $WAN_IFNAME"
+      return 1
+    }
+
+    first_in="${first%% *}"
+    first_out="${first##* }"
+
+    sleep "$WAN_QUIET_SAMPLE_SECONDS"
+
+    if trunk_call_active; then
+      log_msg "$TRUNK_NAME trunk call active after quiet sample; router power cycle deferred"
+      return 1
+    fi
+
+    second="$(read_wan_counters "$index")" || {
+      log_msg "could not read second WAN counters for $WAN_IFNAME"
+      return 1
+    }
+
+    second_in="${second%% *}"
+    second_out="${second##* }"
+
+    delta_in="$((second_in - first_in))"
+    delta_out="$((second_out - first_out))"
+
+    if [ "$delta_in" -lt 0 ] || [ "$delta_out" -lt 0 ]; then
+      log_msg "WAN counter decreased; quiet sample ignored"
+      quiet_count=0
+      continue
+    fi
+
+    rx_kbps="$((delta_in * 8 / WAN_QUIET_SAMPLE_SECONDS / 1000))"
+    tx_kbps="$((delta_out * 8 / WAN_QUIET_SAMPLE_SECONDS / 1000))"
+
+    log_msg "WAN sample ${rx_kbps}kbps rx ${tx_kbps}kbps tx"
+
+    if [ "$rx_kbps" -le "$WAN_QUIET_RX_KBPS" ] && [ "$tx_kbps" -le "$WAN_QUIET_TX_KBPS" ]; then
+      quiet_count="$((quiet_count + 1))"
+      log_msg "WAN quiet sample ${quiet_count}/${WAN_QUIET_REQUIRED_SAMPLES}"
+    else
+      quiet_count=0
+      log_msg "WAN not quiet enough; waiting for quiet samples"
+    fi
+  done
+
+  return 0
+}
+
+power_cycle_router() {
+  log_msg "sending Tasmota router power off command"
+  curl --fail --silent --show-error --max-time "$CURL_MAX_TIME_SECONDS" "$TASMOTA_POWER_OFF_URL" >/dev/null
+  date +%s > "$LAST_POWER_CYCLE_FILE"
+  log_msg "router power off command sent; Tasmota plug is expected to restore power automatically"
+}
+
+if ! current_hour_allowed; then
+  log_msg "router power cycle not permitted at this hour"
+  exit 0
+fi
+
+if ! cooldown_ok; then
+  exit 0
+fi
+
+if is_registered; then
+  log_msg "$TRUNK_NAME is Registered; router power cycle not needed"
+  exit 0
+fi
+
+if ! recent_503_persistent; then
+  log_msg "persistent REGISTER 503 condition not met"
+  exit 0
+fi
+
+if trunk_call_active; then
+  log_msg "$TRUNK_NAME trunk call active; router power cycle deferred"
+  exit 0
+fi
+
+wan_ifindex="$(find_wan_ifindex)" || {
+  log_msg "could not find SNMP interface index for $WAN_IFNAME"
+  exit 1
+}
+
+log_msg "persistent REGISTER 503 condition met; waiting for WAN quiet state on $WAN_IFNAME index $wan_ifindex"
+
+if ! wan_quiet_enough "$wan_ifindex"; then
+  exit 0
+fi
+
+if trunk_call_active; then
+  log_msg "$TRUNK_NAME trunk call active before router power cycle; deferred"
+  exit 0
+fi
+
+power_cycle_router
+exit 0

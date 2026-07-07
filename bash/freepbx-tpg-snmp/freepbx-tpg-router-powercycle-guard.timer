@@ -1,0 +1,11 @@
+[Unit]
+Description=Run guarded TPG router power cycle check periodically
+
+[Timer]
+OnBootSec=300
+OnUnitActiveSec=300
+AccuracySec=30
+Unit=freepbx-tpg-router-powercycle-guard.service
+
+[Install]
+WantedBy=timers.target

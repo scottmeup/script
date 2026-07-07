@@ -1,0 +1,8 @@
+[Unit]
+Description=Guarded TPG router power cycle after persistent SIP REGISTER 503 failures
+After=network-online.target asterisk.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/freepbx-tpg-router-powercycle-guard

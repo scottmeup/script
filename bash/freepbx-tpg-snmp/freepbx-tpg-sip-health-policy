@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+# install file to
+# /usr/local/sbin/freepbx-tpg-sip-health-policy
+
+
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+ENV_FILE = os.environ.get('ENV_FILE', '/etc/freepbx-wanip-hosts/freepbx-tpg-sip-health-policy.env')
+
+def load_env(path):
+    values = {}
+    with open(path, 'r', encoding='utf-8') as handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, value = line.split('=', 1)
+            values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+def log(message):
+    subprocess.run(['logger', '-t', 'freepbx-tpg-sip-health-policy', message], check=False)
+
+if not os.path.exists(ENV_FILE):
+    print(f'ENV file not readable: {ENV_FILE}', file=sys.stderr)
+    sys.exit(10)
+
+cfg = load_env(ENV_FILE)
+TPG_HOST = cfg.get('TPG_HOST', 'uni-v1.tpg.com.au')
+HOSTS_FILE = cfg.get('HOSTS_FILE', '/etc/hosts')
+STATE_DIR = cfg.get('STATE_DIR', '/etc/freepbx-wanip-hosts/tpg-sip-health-state')
+HEALTH_CHECK = cfg.get('HEALTH_CHECK', '/usr/local/sbin/freepbx-tpg-sip-health-check')
+HEALTH_JSON = cfg.get('HEALTH_JSON', os.path.join(STATE_DIR, 'sip-health.json'))
+SELECT_STATES = set(cfg.get('SELECT_STATES', 'healthy mixed').split())
+PING_PROBE_ENABLED = cfg.get('PING_PROBE_ENABLED', 'yes').lower() == 'yes'
+PING_COUNT = int(cfg.get('PING_COUNT', '2'))
+PING_TIMEOUT_SECONDS = int(cfg.get('PING_TIMEOUT_SECONDS', '1'))
+PING_MIN_SUCCESS = int(cfg.get('PING_MIN_SUCCESS', '1'))
+PING_FILTER_SELECTED_NODES = cfg.get('PING_FILTER_SELECTED_NODES', 'yes').lower() == 'yes'
+REFRESH_ASTERISK_AFTER_POLICY_CHANGE = cfg.get('REFRESH_ASTERISK_AFTER_POLICY_CHANGE', 'no').lower() == 'yes'
+TRUNK_NAME = cfg.get('TRUNK_NAME', 'TPG-VoIP')
+BACKUP_KEEP = int(cfg.get('BACKUP_KEEP', '20'))
+MANAGED_BEGIN = f'# BEGIN FREEPBX-TPG-SIP-HEALTH-POLICY {TPG_HOST}'
+MANAGED_END = f'# END FREEPBX-TPG-SIP-HEALTH-POLICY {TPG_HOST}'
+LOCK_FILE = cfg.get('LOCK_FILE', '/run/freepbx-tpg-sip-health-policy.lock')
+
+os.makedirs(STATE_DIR, exist_ok=True)
+lock_fd = os.open(LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
+try:
+    subprocess.run(['flock', '-n', str(lock_fd)], check=True)
+except subprocess.CalledProcessError:
+    sys.exit(0)
+
+def run_health_check():
+    result = subprocess.run([HEALTH_CHECK], capture_output=True, text=True)
+    if result.returncode != 0:
+        log(f'health check failed with exit {result.returncode}; hosts policy not changed')
+        print(result.stdout, end='')
+        print(result.stderr, end='', file=sys.stderr)
+        sys.exit(30)
+
+def read_health():
+    try:
+        with open(HEALTH_JSON, 'r', encoding='utf-8') as handle:
+            data = json.load(handle)
+    except Exception as exc:
+        log(f'could not read health JSON: {exc}; hosts policy not changed')
+        sys.exit(31)
+    resolved = data.get('resolved_nodes') or []
+    records = data.get('records') or []
+    if not resolved:
+        log('health JSON has no resolved nodes; hosts policy not changed')
+        sys.exit(32)
+    return resolved, records
+
+def ping_node(node):
+    if not PING_PROBE_ENABLED:
+        return None
+    try:
+        result = subprocess.run(
+            ['ping', '-n', '-c', str(PING_COUNT), '-W', str(PING_TIMEOUT_SECONDS), node],
+            capture_output=True,
+            text=True,
+            timeout=max(5, PING_COUNT * (PING_TIMEOUT_SECONDS + 1) + 2),
+        )
+    except Exception:
+        return False
+    match = re.search(r'(\d+)\s+received', result.stdout)
+    if not match:
+        return False
+    return int(match.group(1)) >= PING_MIN_SUCCESS
+
+def select_nodes(resolved, records):
+    by_node = {record.get('node'): record for record in records}
+    sip_candidates = [node for node in resolved if by_node.get(node, {}).get('state') in SELECT_STATES]
+    ping_results = {node: ping_node(node) for node in resolved} if PING_PROBE_ENABLED else {}
+
+    if sip_candidates:
+        if PING_PROBE_ENABLED and PING_FILTER_SELECTED_NODES:
+            ping_good = [node for node in sip_candidates if ping_results.get(node) is True]
+            if ping_good:
+                return ping_good, 'sip_healthy_ping_reachable', ping_results
+            return sip_candidates, 'sip_healthy_ping_unavailable_fail_open_selected', ping_results
+        return sip_candidates, 'sip_healthy', ping_results
+
+    return list(resolved), 'no_healthy_sip_nodes_fail_open_all_resolved', ping_results
+
+def active_trunk_call():
+    result = subprocess.run(['asterisk', '-rx', 'core show channels concise'], capture_output=True, text=True)
+    return f'PJSIP/{TRUNK_NAME}-' in result.stdout
+
+def current_hosts_nodes():
+    path = Path(HOSTS_FILE)
+    nodes = []
+    if not path.exists():
+        return nodes
+    for raw in path.read_text(encoding='utf-8', errors='ignore').splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and TPG_HOST in parts[1:]:
+            nodes.append(parts[0])
+    return nodes
+
+def backup_hosts():
+    path = Path(HOSTS_FILE)
+    ts = dt.datetime.now().strftime('%Y%m%d-%H%M%S')
+    backup = Path(STATE_DIR) / f'hosts.{ts}.bak'
+    shutil.copy2(path, backup)
+    backups = sorted(Path(STATE_DIR).glob('hosts.*.bak'))
+    for old in backups[:-BACKUP_KEEP]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+def write_hosts(selected):
+    path = Path(HOSTS_FILE)
+    original = path.read_text(encoding='utf-8', errors='ignore').splitlines()
+    output = []
+    in_block = False
+    for raw in original:
+        line = raw.strip()
+        if raw == MANAGED_BEGIN:
+            in_block = True
+            continue
+        if raw == MANAGED_END:
+            in_block = False
+            continue
+        if in_block:
+            continue
+        if line and not line.startswith('#'):
+            parts = line.split()
+            if len(parts) >= 2 and TPG_HOST in parts[1:]:
+                continue
+        output.append(raw)
+    output.append(MANAGED_BEGIN)
+    for node in selected:
+        output.append(f'{node} {TPG_HOST}')
+    output.append(MANAGED_END)
+    path.write_text('\n'.join(output) + '\n', encoding='utf-8')
+
+def refresh_asterisk_if_allowed():
+    if not REFRESH_ASTERISK_AFTER_POLICY_CHANGE:
+        return
+    if active_trunk_call():
+        log('hosts changed but Asterisk restart skipped because trunk call is active')
+        return
+    log('restarting Asterisk after SIP health policy hosts change')
+    subprocess.run(['systemctl', 'restart', 'asterisk'], check=False)
+
+run_health_check()
+resolved_nodes, records = read_health()
+selected_nodes, reason, ping_results = select_nodes(resolved_nodes, records)
+
+if not selected_nodes:
+    log('selected node set is empty; refusing to change hosts')
+    sys.exit(40)
+
+current = current_hosts_nodes()
+if current == selected_nodes:
+    log(f'node policy unchanged for {TPG_HOST}: {" ".join(selected_nodes)} reason={reason}')
+    print(f'unchanged {TPG_HOST}: {" ".join(selected_nodes)} reason={reason}')
+    sys.exit(0)
+
+backup_hosts()
+write_hosts(selected_nodes)
+refresh_asterisk_if_allowed()
+
+ping_text = ','.join(f'{node}:{ping_results.get(node)}' for node in resolved_nodes) if ping_results else 'disabled'
+log(f'applied node policy for {TPG_HOST}: {" ".join(selected_nodes)} reason={reason} ping={ping_text}')
+print(f'applied {TPG_HOST}: {" ".join(selected_nodes)} reason={reason}')

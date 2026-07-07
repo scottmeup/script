@@ -1,0 +1,14 @@
+# install file to
+# /etc/systemd/system/freepbx-tpg-sip-health-policy.timer
+
+[Unit]
+Description=Run TPG SIP health /etc/hosts policy periodically
+
+[Timer]
+OnBootSec=240
+OnUnitActiveSec=60
+AccuracySec=15
+Unit=freepbx-tpg-sip-health-policy.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+# install file to
+# /etc/systemd/system/freepbx-tpg-sip-health-policy.service
+
+[Unit]
+Description=Apply TPG SIP health policy to /etc/hosts
+After=network-online.target asterisk.service freepbx-tpg-sip-health-check.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/freepbx-tpg-sip-health-policy

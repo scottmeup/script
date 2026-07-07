@@ -43,7 +43,8 @@ fi
 mkdir -p "$ETC_DIR" "$SBIN_DIR" "$SYSTEMD_DIR" "$PCAP_DIR" \
   "$ETC_DIR/tpg-sip-health-state" \
   "$ETC_DIR/router-powercycle-state" \
-  "$ETC_DIR/tpg-node-health-state"
+  "$ETC_DIR/tpg-node-health-state" \
+  "$ETC_DIR/outbound-failure-state"
 
 install_script() {
   install -o root -g root -m 750 "$SRC_DIR/$1" "$SBIN_DIR/$1"
@@ -90,6 +91,7 @@ bash_scripts=(
 python_scripts=(
   freepbx-tpg-sip-health-check
   freepbx-tpg-sip-health-policy
+  freepbx-tpg-outbound-failure-recover
 )
 
 for script in "${bash_scripts[@]}"; do
@@ -114,6 +116,7 @@ systemctl enable --now freepbx-tpg-router-powercycle-guard.timer
 systemctl enable --now freepbx-tpg-sip-health-check.timer
 systemctl enable --now freepbx-tpg-sip-health-policy.timer
 systemctl enable --now freepbx-tpg-sip-health-policy-watch.service
+systemctl enable --now freepbx-tpg-outbound-failure-recover.timer
 
 systemctl disable --now freepbx-tpg-node-health-update.timer >/dev/null 2>&1 || true
 
@@ -123,6 +126,10 @@ fi
 
 if [ -x "$SBIN_DIR/freepbx-tpg-sip-health-policy" ]; then
   "$SBIN_DIR/freepbx-tpg-sip-health-policy" >/dev/null || true
+fi
+
+if [ -x "$SBIN_DIR/freepbx-tpg-outbound-failure-recover" ]; then
+  "$SBIN_DIR/freepbx-tpg-outbound-failure-recover" >/dev/null || true
 fi
 
 if [ -x "$SBIN_DIR/freepbx-tpg-router-powercycle-guard" ]; then
@@ -153,6 +160,7 @@ Enabled and started:
   freepbx-tpg-sip-health-check.timer
   freepbx-tpg-sip-health-policy.timer
   freepbx-tpg-sip-health-policy-watch.service
+  freepbx-tpg-outbound-failure-recover.timer
 
 Disabled if present:
   freepbx-tpg-node-health-update.timer
@@ -168,6 +176,7 @@ Recommended checks:
   systemctl status freepbx-tpg-sip-health-check.timer -l --no-pager
   systemctl status freepbx-tpg-sip-health-policy.timer -l --no-pager
   systemctl status freepbx-tpg-sip-health-policy-watch.service -l --no-pager
+  systemctl status freepbx-tpg-outbound-failure-recover.timer -l --no-pager
   cat /etc/freepbx-wanip-hosts/tpg-sip-health-state/sip-health-summary.txt
   grep -n "uni-v1.tpg.com.au" /etc/hosts
 REPORT

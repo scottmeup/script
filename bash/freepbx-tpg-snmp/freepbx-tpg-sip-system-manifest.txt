@@ -1,3 +1,6 @@
+# FreePBX TPG SIP system installer manifest
+# One required source filename per non-comment line.
+# Place this manifest, install-freepbx-tpg-sip-system, and every listed file in the same directory.
 freepbx-wanip-hosts-update
 freepbx-wanip-registration-recover
 freepbx-wanip-registration-watchdog

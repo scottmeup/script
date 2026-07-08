@@ -143,7 +143,7 @@ def clean_ip(endpoint):
 def recent_success_epoch_from_pcaps():
     nodes = resolved_nodes()
     if not nodes:
-        return 0
+        return (0, '', '')
     now = dt.datetime.now(dt.timezone.utc).timestamp()
     cutoff = now - SUCCESS_WINDOW_SECONDS
     pcaps = []
@@ -158,7 +158,9 @@ def recent_success_epoch_from_pcaps():
     packet_re = re.compile(r'^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(?:(?:\S+)\s+)?(?:(?:In|Out)\s+)?IP\s+([^\s]+)\.5060\s+>\s+([^\s]+)\.5060:\s+SIP(?::\s*(.*))?$', re.IGNORECASE)
     status_re = re.compile(r'SIP/2\.0\s+(\d{3})\s+([^\r\n]+)')
     cseq_re = re.compile(r'^CSeq:\s*\d+\s+([A-Z]+)', re.IGNORECASE)
-    best = 0
+    best_ts = 0
+    best_code = ''
+    best_node = ''
     for pcap in pcaps:
         proc = subprocess.run([TCPDUMP, '-nn', '-tttt', '-r', pcap, '-A', 'udp port 5060'], capture_output=True, text=True, errors='ignore')
         if proc.returncode not in (0, 1):
@@ -190,17 +192,26 @@ def recent_success_epoch_from_pcaps():
             if cseq:
                 current['method'] = cseq.group(1).upper()
                 if current['method'] == 'INVITE' and current['code'] in SUCCESS_CODES and current['ts'] >= cutoff:
-                    best = max(best, int(current['ts']))
-    return best
+                    if current['ts'] > best_ts:
+                        best_ts = int(current['ts'])
+                        best_code = current['code']
+                        best_node = current['node']
+    return (best_ts, best_code, best_node)
 
 def recent_success_exists():
-    pcap_success = recent_success_epoch_from_pcaps()
+    pcap_success, success_code, success_node = recent_success_epoch_from_pcaps()
     stored_success = epoch_file(last_success_file)
     best = max(pcap_success, stored_success)
     if best:
         write_epoch(last_success_file, best)
     if best and int(time.time()) - best <= SUCCESS_WINDOW_SECONDS:
-        log(f'recent outbound success detected {int(time.time()) - best}s ago; router power cycle suppressed')
+        log(
+             f'recent outbound success detected '
+             f'{int(time.time()) - best}s ago '
+             f'code={success_code} '
+             f'node={success_node}; '
+             f'router power cycle suppressed'
+         )
         return True
     return False
 

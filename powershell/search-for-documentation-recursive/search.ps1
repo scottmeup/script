@@ -124,8 +124,38 @@ function Get-RelativePath {
         [string]$TargetPath
     )
 
-    return [System.IO.Path]::GetRelativePath($BasePath, $TargetPath)
+    $normalizedBasePath = [System.IO.Path]::GetFullPath($BasePath)
+    $normalizedTargetPath = [System.IO.Path]::GetFullPath($TargetPath)
+    $directorySeparator = [System.IO.Path]::DirectorySeparatorChar.ToString()
+
+    if (-not $normalizedBasePath.EndsWith($directorySeparator)) {
+        $normalizedBasePath += $directorySeparator
+    }
+
+    $baseUri = New-Object System.Uri($normalizedBasePath)
+    $targetUri = New-Object System.Uri($normalizedTargetPath)
+
+    if ($baseUri.Scheme -ne $targetUri.Scheme) {
+        return $normalizedTargetPath
+    }
+
+    $relativeUri = $baseUri.MakeRelativeUri($targetUri)
+    $relativePath = [System.Uri]::UnescapeDataString(
+        $relativeUri.ToString()
+    )
+
+    $relativePath = $relativePath.Replace(
+        [char]'/',
+        [System.IO.Path]::DirectorySeparatorChar
+    )
+
+    if (:IsNullOrEmpty($relativePath)) {
+        return '.'
+    }
+
+    return $relativePath
 }
+
 
 function Test-ExcludedPath {
     param(

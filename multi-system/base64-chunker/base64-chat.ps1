@@ -1,0 +1,26 @@
+<#
+File role: PowerShell entrypoint that reads .env automatically and packages one input file as chat-sized Base64 text.
+Inputs: .env beside this script. INPUT_FILE is a source-file path; OUTPUT_DIR is a directory path; MAX_CHARS is a positive integer; marker templates support {filename}, {part}, and {total}.
+Processing: Read-Env parses configuration without executing it; Render substitutes placeholders; Get-PartOverhead, Get-Capacity, and Test-Total determine the minimum feasible part count; the top-level flow encodes, frames, checks, and writes output.
+Outputs: <filename>.b64 or sortable <filename>.<sequence>.b64 files encoded as UTF-8 without BOM, plus a console summary. Existing outputs are not overwritten.
+Functions: Read-Env parses required entries; Render substitutes placeholders; Get-PartText builds a block; Get-PartOverhead measures framing; Get-Capacity calculates payload room; Test-Total tests a candidate part count; Write-Utf8NoBom writes a new output.
+Top-level variables: $ScriptDir locates .env and resolves relative configured paths; $Cfg stores parsed configuration.
+#>
+[CmdletBinding()]
+param()
+$ErrorActionPreference='Stop'
+$ScriptDir=$PSScriptRoot
+function Read-Env([string]$Path){if(-not(Test-Path -LiteralPath $Path -PathType Leaf)){throw "Configuration file not found: $Path"};$allowed=@('INPUT_FILE','OUTPUT_DIR','MAX_CHARS','SINGLE_BEGIN','SINGLE_END','MULTI_INTRO','PART_BEGIN','PART_END','FINAL_SIGNAL');$r=@{};foreach($raw in [IO.File]::ReadAllLines($Path)){if(!$raw.Trim()-or$raw.Trim().StartsWith('#')){continue};$i=$raw.IndexOf('=');if($i-lt 1){throw "Invalid configuration line: $raw"};$k=$raw.Substring(0,$i).Trim();if($allowed-notcontains$k){throw "Unsupported configuration key: $k"};$r[$k]=$raw.Substring($i+1)};foreach($k in $allowed){if(-not$r.ContainsKey($k)-or[string]::IsNullOrEmpty($r[$k])){throw "Missing or empty configuration key: $k"}};return$r}
+function Render([string]$Text,[int]$Part,[int]$Total){$Text.Replace('{filename}',$script:FileName).Replace('{part}',[string]$Part).Replace('{total}',[string]$Total)}
+function Get-PartText([string]$Payload,[int]$Part,[int]$Total,[bool]$First,[bool]$Last){$lines=[Collections.Generic.List[string]]::new();if($First){$lines.Add((Render $script:Cfg.MULTI_INTRO $Part $Total))};$lines.Add((Render $script:Cfg.PART_BEGIN $Part $Total));$lines.Add($Payload);$lines.Add((Render $script:Cfg.PART_END $Part $Total));if($Last){$lines.Add((Render $script:Cfg.FINAL_SIGNAL $Part $Total))};[string]::Join("`n",$lines)}
+function Get-PartOverhead([int]$Part,[int]$Total,[bool]$First,[bool]$Last){(Get-PartText '' $Part $Total $First $Last).Length}
+function Get-Capacity([int]$Part,[int]$Total,[bool]$First,[bool]$Last){[Math]::Max(0,$script:MaxChars-(Get-PartOverhead $Part $Total $First $Last))}
+function Test-Total([int]$Total){[long]$sum=0;for($i=1;$i-le$Total;$i++){$cap=Get-Capacity $i $Total ($i-eq 1) ($i-eq$Total);if($cap-le 0){return$false};$sum+=$cap};$sum-ge$script:Payload.Length}
+function Write-Utf8NoBom([string]$Path,[string]$Text){if([IO.File]::Exists($Path)){throw "Refusing to overwrite existing output: $Path"};[IO.File]::WriteAllText($Path,$Text,[Text.UTF8Encoding]::new($false))}
+$script:Cfg=Read-Env (Join-Path $ScriptDir '.env');[int]$script:MaxChars=0;if(-not[int]::TryParse($Cfg.MAX_CHARS,[ref]$script:MaxChars)-or$MaxChars-le 0){throw'MAX_CHARS must be a positive integer'}
+$inputPath=$Cfg.INPUT_FILE;if(-not[IO.Path]::IsPathRooted($inputPath)){$inputPath=Join-Path $ScriptDir $inputPath};$outputDir=$Cfg.OUTPUT_DIR;if(-not[IO.Path]::IsPathRooted($outputDir)){$outputDir=Join-Path $ScriptDir $outputDir};if(-not(Test-Path -LiteralPath $inputPath -PathType Leaf)){throw "Input file not found: $inputPath"};[IO.Directory]::CreateDirectory($outputDir)|Out-Null
+$resolved=(Resolve-Path -LiteralPath $inputPath).Path;$script:FileName=[IO.Path]::GetFileName($resolved);$script:Payload=[Convert]::ToBase64String([IO.File]::ReadAllBytes($resolved));$single=(Render $Cfg.SINGLE_BEGIN 1 1)+"`n"+$Payload+"`n"+(Render $Cfg.SINGLE_END 1 1)
+if($single.Length-le$MaxChars){$path=Join-Path $outputDir "$FileName.b64";Write-Utf8NoBom $path $single;"Mode: single`nPayload characters: $($Payload.Length)`nOutput characters including markers: $($single.Length)`nLimit: $MaxChars`nFile: $path";exit 0}
+$total=2;while(-not(Test-Total $total)){$total++;if($total-gt 1000000){throw'Unable to determine a practical part count'}};$width=$total.ToString().Length;$offset=0
+for($part=1;$part-le$total;$part++){$first=$part-eq 1;$last=$part-eq$total;$cap=Get-Capacity $part $total $first $last;$take=[Math]::Min($cap,$Payload.Length-$offset);$chunk=$Payload.Substring($offset,$take);$offset+=$take;$text=Get-PartText $chunk $part $total $first $last;if($text.Length-gt$MaxChars){throw "Internal size error in part $part"};$seq=$part.ToString("D$width");$path=Join-Path $outputDir "$FileName.$seq.b64";Write-Utf8NoBom $path $text;"Part $part/$total`: $($text.Length) characters: $path"}
+if($offset-ne$Payload.Length){throw'Internal payload accounting error'};"Mode: multipart`nPayload characters: $($Payload.Length)`nParts: $total`nLimit per part: $MaxChars"

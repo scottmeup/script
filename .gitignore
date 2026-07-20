@@ -12,3 +12,4 @@ python/jellyfin-delete-sync/episode_map.db
 python/connectivity-watchdog/mqtt_brokers.conf
 /python/jellyfin-delete-sync/.idea
 /.idea
+/bash/z-deprecated

@@ -16,8 +16,10 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=andrewscott                
-Group=media
+#User=andrewscott                
+#Group=media
+User=root
+Group=root
 # folder where the script lives. Comment this line out if not running User=root or maks sure the user can cd into the directory
 WorkingDirectory=/opt/script
 ExecStart=/usr/bin/bash /opt/script/qbittorrent-cleanup.sh
@@ -26,7 +28,7 @@ StandardError=journal
 
 # Security hardening
 ProtectSystem=strict
-ReadWritePaths=/mnt/sdb2/common
+ReadWritePaths=/mnt/sdb2/common /mnt/sdc1/autobrr_downloads
 ProtectHome=yes
 PrivateTmp=yes
 NoNewPrivileges=yes

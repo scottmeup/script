@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Brings docker compose in the current directory down, then up.
+# Brings docker compose in the current directory down on error.
+if [ -f "$PWD/docker-compose.yaml" ] || [ -f "$PWD/docker-compose.yml" ]; then
+  if ! (docker compose down && docker compose up -d); then
+    docker compose down
+  fi
+else
+  exit 1
+fi

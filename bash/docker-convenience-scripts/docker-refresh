@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Stops, pulls, starts a docker compose in the current directory, then prunes docker images.
+# Stops the docker compose on error
+if [ -f "$PWD/docker-compose.yaml" ] || [ -f "$PWD/docker-compose.yml" ]; then
+  if ! (docker compose down && docker compose pull && docker compose up -d); then
+    docker compose down
+  else
+    docker image prune
+  fi
+else
+  exit 1
+fi

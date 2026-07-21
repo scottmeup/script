@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+set -u
+
+if [[ -f docker-compose.yaml ]]; then
+    compose_file=docker-compose.yaml
+elif [[ -f docker-compose.yml ]]; then
+    compose_file=docker-compose.yml
+else
+    exit 0
+fi
+
+fail() {
+    printf '%s\n' "$1" >&2
+    exit 1
+}
+
+choose_number() {
+    local prompt=$1
+    local maximum=$2
+    local selection
+
+    while true; do
+        if ! read -r -p "$prompt" selection < /dev/tty; then
+            fail "Unable to read a selection from the terminal."
+        fi
+
+        if [[ "$selection" =~ ^[1-9][0-9]*$ ]] && (( selection <= maximum )); then
+            printf '%s\n' "$selection"
+            return 0
+        fi
+
+        printf 'Invalid selection. Enter a number from 1 to %d.\n' "$maximum" >&2
+    done
+}
+
+get_container_name() {
+    docker inspect --format '{{.Name}}' "$1" 2>/dev/null | sed 's#^/##'
+}
+
+enter_container() {
+    local service=$1
+    local index=$2
+
+    exec docker compose -f "$compose_file" exec --index "$index" "$service" /bin/sh
+}
+
+if (( $# > 1 )); then
+    fail "Usage: ${0##*/} [CONTAINER_INDEX|CONTAINER_NAME]"
+fi
+
+container_selector=${1:-}
+
+if ! compose_services=$(docker compose -f "$compose_file" config --services 2>/dev/null); then
+    fail "Unable to read services from $compose_file."
+fi
+
+mapfile -t services <<< "$compose_services"
+
+if (( ${#services[@]} == 0 )) || [[ -z "${services[0]}" ]]; then
+    fail "No services are defined in $compose_file."
+fi
+
+if (( ${#services[@]} == 1 )); then
+    service=${services[0]}
+else
+    printf 'Services defined in %s:\n' "$compose_file"
+    for i in "${!services[@]}"; do
+        printf '  %d) %s\n' "$((i + 1))" "${services[$i]}"
+    done
+
+    service_index=$(choose_number \
+        "Select a service [1-${#services[@]}]: " \
+        "${#services[@]}")
+    service=${services[$((service_index - 1))]}
+fi
+
+if ! running_ids=$(docker compose -f "$compose_file" ps --status running -q "$service" 2>/dev/null); then
+    fail "Unable to determine whether service '$service' is running."
+fi
+
+if [[ -z "$running_ids" ]]; then
+    fail "Service '$service' is not running."
+fi
+
+mapfile -t container_ids <<< "$running_ids"
+container_names=()
+
+for container_id in "${container_ids[@]}"; do
+    if ! name=$(get_container_name "$container_id") || [[ -z "$name" ]]; then
+        fail "Unable to determine the name of container '$container_id'."
+    fi
+    container_names+=("$name")
+done
+
+if [[ -n "$container_selector" ]]; then
+    if [[ "$container_selector" =~ ^[1-9][0-9]*$ ]]; then
+        if (( container_selector > ${#container_ids[@]} )); then
+            fail "Container index '$container_selector' is out of range for service '$service'."
+        fi
+        selected_index=$container_selector
+    else
+        selected_index=0
+        for i in "${!container_names[@]}"; do
+            if [[ "${container_names[$i]}" == "$container_selector" ]]; then
+                selected_index=$((i + 1))
+                break
+            fi
+        done
+
+        if (( selected_index == 0 )); then
+            fail "No running container named '$container_selector' belongs to service '$service'."
+        fi
+    fi
+elif (( ${#container_ids[@]} == 1 )); then
+    selected_index=1
+else
+    printf 'Running containers for service %s:\n' "$service"
+    for i in "${!container_names[@]}"; do
+        printf '  %d) %s\n' "$((i + 1))" "${container_names[$i]}"
+    done
+
+    selected_index=$(choose_number \
+        "Select a container [1-${#container_names[@]}]: " \
+        "${#container_names[@]}")
+fi
+
+enter_container "$service" "$selected_index"

@@ -18,7 +18,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord);
 //
 // To-do
 // - Fix pulse[6] device 7 configuration: head decay
-// -- bool color_combine_pulse_head_with_fade_in
+// -- enabled in configuration via bool color_combine_pulse_head_with_fade_in
+// -- should work similarly to pulse[4] device 5 but in the head instead of behind the pulse
+// -- need to check if blended head area 
 // - Check timing of first LED in fade_and_decay_first_and_last_led_only
 // - Look into brightness as a function of RGB, consider re-working brightness calculation
 // - - Especially for blending pulse head to fade-in
@@ -111,8 +113,8 @@ struct Pulse_settings
 //
 void Initialize_pulse_settings_array(inout Pulse_settings pulse[size_of_display_in_columns]){
     // Use order of variables listed above in "struct Pulse_settings"
-    //                                                                                                              LEDs in |Pulse |Decay|Decay|Fade |Fade | Bright | Min    | Cufoff| BG + | Head+| LED   | 1st+ 
-    //                              Pulse-color  |  Pause-color         | Fade-in color       | Background-color  | Display | Head | Exp | Lin | Exp | Lin | Cutoff | Bright | BG    | Pause| Fade | Output| last
+    //                                                                                                              LEDs in |Pulse |Decay|Decay|Fade |Fade | Bright | Min    | Cufoff | BG + | Head+| LED   | 1st+ 
+    //                              Pulse-color  |  Pause-color         | Fade-in color       | Background-color  | Display | Head | Exp | Lin | Exp | Lin | Cutoff | Bright | BG     | Pause| Fade | Output| last
     pulse[0]  = Pulse_settings(vec3(1.0, 0.0, 0.0 ), vec3(0.0, 0.0, 0.05), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 5.0,      1.0,   3.0,  0.0,  0.0,   0.0,  0.025,   0.0,     false,  true, false,  false,   false);     // Device 1
     pulse[1]  = Pulse_settings(vec3(1.0, 0.75, 0.0), vec3(0.0, 0.0, 0.05), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 3.0,      1.0,   3.0,  0.0,  0.0,   0.0,  0.025,   0.0,     false,  true, false,  false,   false);     // Device 2
     pulse[2]  = Pulse_settings(vec3(1.0, 1.0, 0.0 ), vec3(0.0, 0.0, 0.1 ), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 3.0,      2.0,   3.0,  0.0,  0.0,   0.0,  0.025,   0.0,     false,  true, false,  false,   false);     // Device 3

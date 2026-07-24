@@ -769,11 +769,20 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
     
  
     // Generate head
-    bool head_is_defined = define_led_element_at_offset_from_pulse_index(head_offset_in_leds, size_pulse_head_in_leds, size_of_display_in_leds, distance_of_current_location_in_front_of_pulse_as_percent_of_display, distance_of_current_location_behind_pulse_as_percent_of_display);
+    if(color_combine_pulse_head_with_fade_in){
+        // Do something different when blending the fade in to the pulse head
+    }
+    bool head_is_defined = define_led_element_at_offset_from_pulse_index(
+        head_offset_in_leds, 
+        size_pulse_head_in_leds, 
+        size_of_display_in_leds, 
+        distance_of_current_location_in_front_of_pulse_as_percent_of_display, 
+        distance_of_current_location_behind_pulse_as_percent_of_display
+    );
     float head_factor = 0.0;
     if(head_is_defined && color_combine_pulse_head_with_fade_in){
         // Not working as intended - probably need to offset area that head is defined, either negative to the current offset or one screen length minus the size of the head
-        head_factor = 1.0 - (distance_of_current_location_behind_pulse_as_percent_of_display / size_pulse_head_as_percent_of_display);
+        head_factor =  (distance_of_current_location_behind_pulse_as_percent_of_display / size_pulse_head_as_percent_of_display);
     }
     else if(head_is_defined){
         head_factor = 1.0;

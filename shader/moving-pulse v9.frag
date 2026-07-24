@@ -20,7 +20,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord);
 // - Fix pulse[6] device 7 configuration: head decay
 // -- enabled in configuration via bool color_combine_pulse_head_with_fade_in
 // -- should work similarly to pulse[4] device 5 but in the head instead of behind the pulse
-// -- need to check if blended head area 
+// -- need to check if blended head size can be defined separately from normal head size
 // - Check timing of first LED in fade_and_decay_first_and_last_led_only
 // - Look into brightness as a function of RGB, consider re-working brightness calculation
 // - - Especially for blending pulse head to fade-in

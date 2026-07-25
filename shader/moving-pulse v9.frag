@@ -37,10 +37,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord);
 const int size_of_display_in_columns = 11;    // how many parallel pulses to run
 const bool direction_movement_horizontal = false;
 const bool direction_movement_reversed = true;
-//const float duration_of_pause = 5.0;   //  Time between the front of the pulse leaving the screen and the next pulse appearing 
-const float duration_of_pulse = 3.0;    // Time taken for the front of the pulse to run across the display
+//const float duration_of_pause = 5.0;   //  Time between the front of the pulse leaving the screen and the next pulse appearing
 const float duration_of_pause = 0.0;   // disable pause while testing fade
-const float speed_global_modifier = 0.05;    // When set to 1.0, cycle will play at 1 second per unit of duration
+const float duration_of_pulse = 3.0;    // Time taken for the front of the pulse to run across the display
+const float speed_global_modifier = .02;    // When set to 1.0, cycle will play at 1 second per unit of duration
 //
 //
 // End User Config Section
@@ -569,7 +569,7 @@ float generate_head(
     float size_pulse_head_in_leds = pulse.size_pulse_head_in_leds;
     float size_of_led_as_percent_of_display = (1.0 / size_of_display_in_leds);
     float size_pulse_head_as_percent_of_display = size_of_led_as_percent_of_display * size_pulse_head_in_leds;
-    float head_factor = 0.0;
+    float head_factor = 0.0;        // Brightness intensity from 0.0 to 1.0
 
 
     // Good idea to make this it's own separate function.
@@ -812,8 +812,11 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
     // Generate offsets of decay from head location
     //
     // head_buffer_leds = 0.0 results in full illumination of exactly 1 LED at a time with fade_in + decay pulse
+    // head_buffer_leds > 0.0 will increase the area on either side of the pulse boundary that is at full brightness by the number of LED elements specified 
     float head_buffer_leds = 0.0; 
     // 0.0 is original behaviour: align with head beginning at pulse index and trailing pulse
+    // > 0.0 shifts the decay regions behind the pulse boundary
+    // < 0.0 shifts the decay regions ahead of the pulse boundary
     float head_buffer_alignment = 0.0;  
     if(!display_discrete_led_output){
         // Center head on pulse index in contiuous output mode

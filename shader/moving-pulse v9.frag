@@ -98,6 +98,7 @@ struct Pulse_settings
     float fade_in_speed_linear;                                     // 0.0 for no linear fade-in. Generate a fade-in on the LED before the pulse. Higher number = faster = shorter.
     float color_brightness_cutoff;                                  // switch to non-pulse, "pause" section of cycle coloring below this brightness.
     float color_pulse_minimum_brightness_percent;                   // Minimum brightness of pulse as a percent. Will not decay below this level.
+    float blended_fade_in_head_size;                                // Size in LED elements to use for blending fade-in colour to head colour.
     bool color_brightness_cutoff_includes_background_brightness;    // Consider background coloring or not when determining the brightness of a pixel for cutoff to pause coloring.
     bool color_combine_background_with_pause_color;                 // Overlay the background color on top of the "pause" / negative space color.
     bool color_combine_pulse_head_with_fade_in;                     // Smooth transition between fade-in and pulse head
@@ -113,21 +114,21 @@ struct Pulse_settings
 //
 void Initialize_pulse_settings_array(inout Pulse_settings pulse[size_of_display_in_columns]){
     // Use order of variables listed above in "struct Pulse_settings"
-    //                                                                                                              LEDs in |Pulse |Decay|Decay|Fade |Fade | Bright | Min    | Cufoff | BG + | Head+| LED   | 1st+ 
-    //                              Pulse-color  |  Pause-color         | Fade-in color       | Background-color  | Display | Head | Exp | Lin | Exp | Lin | Cutoff | Bright | BG     | Pause| Fade | Output| last
-    pulse[0]  = Pulse_settings(vec3(1.0, 0.0, 0.0 ), vec3(0.0, 0.0, 0.05), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 5.0,      1.0,   3.0,  0.0,  0.0,   0.0,  0.025,   0.0,     false,  true, false,  false,   false);     // Device 1
-    pulse[1]  = Pulse_settings(vec3(1.0, 0.75, 0.0), vec3(0.0, 0.0, 0.05), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 3.0,      1.0,   3.0,  0.0,  0.0,   0.0,  0.025,   0.0,     false,  true, false,  false,   false);     // Device 2
-    pulse[2]  = Pulse_settings(vec3(1.0, 1.0, 0.0 ), vec3(0.0, 0.0, 0.1 ), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 3.0,      2.0,   3.0,  0.0,  0.0,   0.0,  0.025,   0.0,     false,  true, false,  false,   false);     // Device 3
-    pulse[3]  = Pulse_settings(vec3(0.0, 1.0, 0.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 14.0,     1.0,   3.0,  0.0,  14.0,  0.0,  0.025,   0.0,     false,  true, false,  false,   false);     // Device 4
-    pulse[4]  = Pulse_settings(vec3(0.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0), 8.0,      1.0,   3.0,  0.0,  0.0,   0.0,  0.025,   0.0,     false,  true, false,  false,   false);     // Device 5
-    pulse[5]  = Pulse_settings(vec3(0.0, 1.0, 1.0 ), vec3(0.0, 0.0, 0.5 ), vec3(0.0, 0.0, 0.0), vec3(0.0, 0.0, 0.0), 8.0,      1.0,   3.0,  0.0,  0.0,   0.0,  0.1,     0.0,     false,  true, false,  false,   false);     // Device 6
-    pulse[6]  = Pulse_settings(vec3(0.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.5, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 8.0,      1.0,   3.0,  0.0, 64.0,   0.0,  0.025,   0.0,     false,  true, true,   false,   false);     // Device 7
-//    pulse[7]  = Pulse_settings(vec3(1.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 3.0,      1.0,   3.0,  0.0,  1.0,   3.0,  0.025,   0.0,     false,  true, false,  true,   true );     // Device 8
-//    pulse[8]  = Pulse_settings(vec3(0.5, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.5, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 4.0,      0.0,   0.0,  1.0,  0.0,   1.0,  0.025,   0.0,     false,  true, false,  true,   false );    // Device 9
-    pulse[7]  = Pulse_settings(vec3(1.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 2.0,      1.0,   3.0,  0.0,  1.0,   3.0,  0.025,   0.0,     false,  true, false,  false,   true );     // Device 8
-    pulse[8]  = Pulse_settings(vec3(1.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 2.0,      1.0,   3.0,  0.0,  1.0,   3.0,  0.025,   0.0,     false,  true, false,  false,  false );    // Device 9
-    pulse[9]  = Pulse_settings(vec3(1.0, 1.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 1.0, 1.0), vec3(0.0, 0.0, 0.0), 4.0,      0.0,   9.0,  0.0,  9.0,   0.0,  0.025,   0.0,     false,  true, false,  false,  false );    // Device 10
-    pulse[10] = Pulse_settings(vec3(1.0, 1.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 1.0, 1.0), vec3(0.0, 0.0, 0.0), 4.0,      0.0,   0.0,  1.5,  0.0,   0.0,  0.025,   0.3,     false,  true, false,  false,  false );    // Device 11
+    //                                                                                                              LEDs in |Pulse |Decay|Decay|Fade |Fade | Bright | Min    | blend | Cufoff | BG + | Head+| LED   | 1st+ 
+    //                              Pulse-color  |  Pause-color         | Fade-in color       | Background-color  | Display | Head | Exp | Lin | Exp | Lin | Cutoff | Bright | size  | BG     | Pause| Fade | Output| last
+    pulse[0]  = Pulse_settings(vec3(1.0, 0.0, 0.0 ), vec3(0.0, 0.0, 0.05), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 5.0,      1.0,   3.0,  0.0,  0.0,   0.0,  0.025,   0.0,   0.0,    false,  true, false,  false,   false);     // Device 1
+    pulse[1]  = Pulse_settings(vec3(1.0, 0.75, 0.0), vec3(0.0, 0.0, 0.05), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 3.0,      1.0,   3.0,  0.0,  0.0,   0.0,  0.025,   0.0,   0.0,    false,  true, false,  false,   false);     // Device 2
+    pulse[2]  = Pulse_settings(vec3(1.0, 1.0, 0.0 ), vec3(0.0, 0.0, 0.1 ), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 3.0,      2.0,   3.0,  0.0,  0.0,   0.0,  0.025,   0.0,   0.0,    false,  true, false,  false,   false);     // Device 3
+    pulse[3]  = Pulse_settings(vec3(0.0, 1.0, 0.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 14.0,     1.0,   3.0,  0.0,  14.0,  0.0,  0.025,   0.0,   0.0,    false,  true, false,  false,   false);     // Device 4
+    pulse[4]  = Pulse_settings(vec3(0.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0), 8.0,      1.0,   3.0,  0.0,  0.0,   0.0,  0.025,   0.0,   0.0,    false,  true, false,  false,   false);     // Device 5
+    pulse[5]  = Pulse_settings(vec3(0.0, 1.0, 1.0 ), vec3(0.0, 0.0, 0.5 ), vec3(0.0, 0.0, 0.0), vec3(0.0, 0.0, 0.0), 8.0,      1.0,   3.0,  0.0,  0.0,   0.0,  0.1,     0.0,   0.0,    false,  true, false,  false,   false);     // Device 6
+    pulse[6]  = Pulse_settings(vec3(0.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.5, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 8.0,      1.0,   3.0,  0.0, 64.0,   0.0,  0.025,   0.0,   0.0,    false,  true, true,   false,   false);     // Device 7
+//    pulse[7]  = Pulse_settings(vec3(1.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 3.0,      1.0,   3.0,  0.0,  1.0,   3.0,  0.025,   0.0,   0.0,    false,  true, false,  true,   true );     // Device 8
+//    pulse[8]  = Pulse_settings(vec3(0.5, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.5, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 4.0,      0.0,   0.0,  1.0,  0.0,   1.0,  0.025,   0.0,   0.0,    false,  true, false,  true,   false );    // Device 9
+    pulse[7]  = Pulse_settings(vec3(1.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 2.0,      1.0,   3.0,  0.0,  1.0,   3.0,  0.025,   0.0,   0.0,    false,  true, false,  false,   true );     // Device 8
+    pulse[8]  = Pulse_settings(vec3(1.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 2.0,      1.0,   3.0,  0.0,  1.0,   3.0,  0.025,   0.0,   0.0,    false,  true, false,  false,  false );    // Device 9
+    pulse[9]  = Pulse_settings(vec3(1.0, 1.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 1.0, 1.0), vec3(0.0, 0.0, 0.0), 4.0,      0.0,   9.0,  0.0,  9.0,   0.0,  0.025,   0.0,   0.0,    false,  true, false,  false,  false );    // Device 10
+    pulse[10] = Pulse_settings(vec3(1.0, 1.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 1.0, 1.0), vec3(0.0, 0.0, 0.0), 4.0,      0.0,   0.0,  1.5,  0.0,   0.0,  0.025,   0.3,   0.0,    false,  true, false,  false,  false );    // Device 11
 
 
     /*

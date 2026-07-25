@@ -36,10 +36,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord);
 //
 const int size_of_display_in_columns = 11;    // how many parallel pulses to run
 const bool direction_movement_horizontal = false;
-const bool direction_movement_reversed = false;
-const float duration_of_pause = 5.0;   //  Time between the front of the pulse leaving the screen and the next pulse appearing 
+const bool direction_movement_reversed = true;
+//const float duration_of_pause = 5.0;   //  Time between the front of the pulse leaving the screen and the next pulse appearing 
 const float duration_of_pulse = 3.0;    // Time taken for the front of the pulse to run across the display
-const float speed_global_modifier = 1.0;    // When set to 1.0, cycle will play at 1 second per unit of duration
+const float duration_of_pause = 0.0;   // disable pause while testing fade
+const float speed_global_modifier = 0.05;    // When set to 1.0, cycle will play at 1 second per unit of duration
 //
 //
 // End User Config Section
@@ -83,7 +84,6 @@ const bool debug_show_intended_output =            true;
 
 
 
-
 struct Pulse_settings 
 {
     vec3 rgb_pulse;                                                 // (R, G, B) Color for pulse
@@ -121,7 +121,7 @@ void Initialize_pulse_settings_array(inout Pulse_settings pulse[size_of_display_
     pulse[3]  = Pulse_settings(vec3(0.0, 1.0, 0.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 14.0,     1.0,   3.0,  0.0,  14.0,  0.0,  0.025,   0.0,     false,  true, false,  false,   false);     // Device 4
     pulse[4]  = Pulse_settings(vec3(0.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0), 8.0,      1.0,   3.0,  0.0,  0.0,   0.0,  0.025,   0.0,     false,  true, false,  false,   false);     // Device 5
     pulse[5]  = Pulse_settings(vec3(0.0, 1.0, 1.0 ), vec3(0.0, 0.0, 0.5 ), vec3(0.0, 0.0, 0.0), vec3(0.0, 0.0, 0.0), 8.0,      1.0,   3.0,  0.0,  0.0,   0.0,  0.1,     0.0,     false,  true, false,  false,   false);     // Device 6
-    pulse[6]  = Pulse_settings(vec3(0.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.5, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 8.0,      1.0,   3.0,  0.0, 64.0,   0.0,  0.025,   0.0,     false,  true, true,   false,   false);     // Device 7     Something wrong with the head in this configuration? Looks to have a decay in the head and a decay after the head.
+    pulse[6]  = Pulse_settings(vec3(0.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.5, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 8.0,      1.0,   3.0,  0.0, 64.0,   0.0,  0.025,   0.0,     false,  true, true,   false,   false);     // Device 7
 //    pulse[7]  = Pulse_settings(vec3(1.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 3.0,      1.0,   3.0,  0.0,  1.0,   3.0,  0.025,   0.0,     false,  true, false,  true,   true );     // Device 8
 //    pulse[8]  = Pulse_settings(vec3(0.5, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.5, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 4.0,      0.0,   0.0,  1.0,  0.0,   1.0,  0.025,   0.0,     false,  true, false,  true,   false );    // Device 9
     pulse[7]  = Pulse_settings(vec3(1.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 2.0,      1.0,   3.0,  0.0,  1.0,   3.0,  0.025,   0.0,     false,  true, false,  false,   true );     // Device 8
@@ -160,7 +160,10 @@ void Initialize_pulse_settings_array(inout Pulse_settings pulse[size_of_display_
 // End User Config Section
 
 
-bool close_to(float value_variable, float value_comparison, float tolerance){
+bool close_to(
+    float value_variable, 
+    float value_comparison, 
+    float tolerance){
     if(value_variable > (value_comparison - (tolerance/2.0)) && (value_variable < (value_comparison + (tolerance/2.0)))){
         return true;
     }
@@ -189,13 +192,20 @@ vec3 restrict_vec3_from_0_to_1(vec3 var){
     return var;
 }
 
-float distance_with_mod(float position_initial, float position_final, float size_of_space){
+float distance_with_mod(
+    float position_initial, 
+    float position_final, 
+    float size_of_space){
     // Always returns a positive value: the remainder of (pos_final - pos_initial) / size_of_space
     return mod((position_final - position_initial), size_of_space);
 }
 
 
-vec2 get_decay_and_fade_offsets(float head_buffer_leds, float head_buffer_alignment, float size_of_led_as_percent_of_display, float size_pulse_head_in_leds){
+vec2 get_decay_and_fade_offsets(
+    float head_buffer_leds, 
+    float head_buffer_alignment, 
+    float size_of_led_as_percent_of_display, 
+    float size_pulse_head_in_leds){
     // Alighment & buffer space between full-intensity section and fade-in / decay start for calculations.
     // Takes number of LEDs as inputs and returns percent of display
     //
@@ -219,7 +229,12 @@ vec2 get_decay_and_fade_offsets(float head_buffer_leds, float head_buffer_alignm
 }
 
 
-bool define_led_element_at_offset_from_pulse_index(float offset_from_pulse_in_leds, float size_of_defined_element_in_leds, float size_of_display_in_leds, float distance_of_current_location_in_front_of_pulse_as_percent_of_display, float distance_of_current_location_behind_pulse_as_percent_of_display){
+bool define_led_element_at_offset_from_pulse_index(
+    float offset_from_pulse_in_leds, 
+    float size_of_defined_element_in_leds, float size_of_display_in_leds, 
+    float distance_of_current_location_in_front_of_pulse_as_percent_of_display, 
+    float distance_of_current_location_behind_pulse_as_percent_of_display
+    ){
     // # Clean this up #
     
     float size_of_single_led_as_percent_of_display = 1.0 / size_of_display_in_leds;
@@ -269,7 +284,10 @@ bool define_led_element_at_offset_from_pulse_index(float offset_from_pulse_in_le
 }
 
 
-float get_led_offset_as_percent_of_display(float offset_in_leds, float size_of_led_as_percent_of_display){
+float get_led_offset_as_percent_of_display(
+    float offset_in_leds, 
+    float size_of_led_as_percent_of_display
+    ){
     // Return the display distance for a given number of LED elements as a percentage of the display size
     float offset = offset_in_leds * size_of_led_as_percent_of_display;
     return offset;

@@ -67,7 +67,7 @@ const vec3 grey =       vec3(0.5, 0.5, 0.5);
 const vec3 black =      vec3(0.0, 0.0, 0.0);
 
 // Debug
-const bool debug_master =                          false;
+const bool debug_master =                          true;
 const bool debug_add_overlay_colorshft =           false;
 //
 const bool debug_background =                      true;
@@ -124,10 +124,10 @@ void Initialize_pulse_settings_array(inout Pulse_settings pulse[size_of_display_
     pulse[0]  = Pulse_settings(vec3(1.0, 0.0, 0.0 ), vec3(0.0, 0.0, 0.05), vec3(1.0, 0.0, 0.0 ), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 5.0,      1.0,     3.0,    0.0,   0.0,   0.0,   0.025,   0.0,     0.0,        0.0,         0.0,         0.0,     false,   true,   false,    false,     false,   false );     // Device 1
     pulse[1]  = Pulse_settings(vec3(1.0, 0.75, 0.0), vec3(0.0, 0.0, 0.05), vec3(1.0, 0.75, 0.0), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 3.0,      1.0,     3.0,    0.0,   0.0,   0.0,   0.025,   0.0,     0.0,        0.0,         0.0,         0.0,     false,   true,   false,    false,     false,   false );     // Device 2
     pulse[2]  = Pulse_settings(vec3(1.0, 1.0, 0.0 ), vec3(0.0, 0.0, 0.1 ), vec3(1.0, 1.0, 0.0 ), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 3.0,      2.0,     3.0,    0.0,   0.0,   0.0,   0.025,   0.0,     0.0,        0.0,         0.0,         0.0,     false,   true,   false,    false,     false,   false );     // Device 3
-    pulse[3]  = Pulse_settings(vec3(0.0, 1.0, 0.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.0, 1.0, 0.0 ), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 14.0,     1.0,     3.0,    0.0,  14.0,   0.0,   0.025,   0.0,     0.0,        0.0,         0.0,         0.0,     false,   true,   false,    false,     false,   false );     // Device 4
-    pulse[4]  = Pulse_settings(vec3(0.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.0, 1.0, 0.0 ), vec3(0.0, 0.0, 1.0), vec3(0.0, 1.0, 0.0), 8.0,      1.0,     3.0,    0.0,   0.0,   0.0,   0.025,   0.0,     0.0,        0.0,         0.0,         0.0,     false,   true,   false,    false,     false,   false );     // Device 5
-    pulse[5]  = Pulse_settings(vec3(0.0, 1.0, 1.0 ), vec3(0.0, 0.0, 0.5 ), vec3(0.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0), vec3(0.0, 0.0, 0.0), 8.0,      1.0,     3.0,    0.0,   0.0,   0.0,   0.1,     0.0,     0.0,        0.0,         0.0,         0.0,     false,   true,   false,    false,     false,   false );     // Device 6
-    pulse[6]  = Pulse_settings(vec3(0.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.0, 0.0, 1.0 ), vec3(0.5, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 8.0,      1.0,     3.0,    0.0,  64.0,   0.0,   0.025,   0.0,     0.0,        0.0,         0.0,         0.0,     false,   true,   true,     false,     false,   false );     // Device 7
+    pulse[3]  = Pulse_settings(vec3(0.0, 1.0, 0.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.0, 1.0, 0.0 ), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 14.0,     1.0,     3.0,    0.0,  14.0,   0.0,   0.025,   0.0,     0.0,        0.0,         0.0,         1.0,     false,   true,   false,    false,     false,   false );     // Device 4
+    pulse[4]  = Pulse_settings(vec3(0.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.0, 1.0, 0.0 ), vec3(0.0, 0.0, 1.0), vec3(0.0, 1.0, 0.0), 8.0,      1.0,     3.0,    0.0,   0.0,   0.0,   0.025,   0.0,     0.0,        0.0,         0.0,         2.0,     false,   true,   false,    false,     false,   false );     // Device 5
+    pulse[5]  = Pulse_settings(vec3(0.0, 1.0, 1.0 ), vec3(0.0, 0.0, 0.5 ), vec3(0.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0), vec3(0.0, 0.0, 0.0), 8.0,      1.0,     3.0,    0.0,   0.0,   0.0,   0.1,     0.0,     0.0,        0.0,         0.0,         3.0,     false,   true,   false,    false,     false,   false );     // Device 6
+    pulse[6]  = Pulse_settings(vec3(0.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.0, 0.0, 1.0 ), vec3(0.5, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 8.0,      1.0,     3.0,    0.0,  64.0,   0.0,   0.025,   0.0,     0.0,        0.0,         0.0,         4.0,     false,   true,   true,     false,     false,   false );     // Device 7
 //    pulse[7]  = Pulse_settings(vec3(1.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 3.0,      1.0,   3.0,  0.0,  1.0,   3.0,  0.025,   0.0,   0.0,    false,  true,  false,  true,   true );     // Device 8
 //    pulse[8]  = Pulse_settings(vec3(0.5, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.5, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 4.0,      0.0,   0.0,  1.0,  0.0,   1.0,  0.025,   0.0,   0.0,    false,  true,  false,  true,   false );    // Device 9
     pulse[7]  = Pulse_settings(vec3(1.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 0.0, 1.0 ), vec3(1.0, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 2.0,      1.0,     3.0,    0.0,   1.0,   3.0,   0.025,   0.0,     0.0,         0.0,        0.0,         0.0,     false,   true,   false,    false,      false,   true  );     // Device 8
@@ -737,6 +737,18 @@ vec3 generate_rgb_output_column(Pulse_settings pulse, vec2 screen_location_adjus
 }
 */
 
+float get_offset_of_whole_element(
+    float current_location,
+    float size_to_offset_by, 
+    float size_of_cycle)
+// Takes current location of element, the amount to offset it by, and the size of the cycle.
+// +ive size_to_offset_by advances the position
+// -ive size_to_offset_by retards the position
+{
+    float offset_position = mod(current_location-size_to_offset_by, size_of_cycle);
+    return offset_position;
+}
+
 
 
 void mainImage( out vec4 fragColor, in vec2 fragCoord )
@@ -747,7 +759,9 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
     Initialize_pulse_settings_array(pulse_array);
 
 
-    // Set parameters related to display calculation
+    // Set parameters related to display calculation.
+    // y-axis is the direction of motion
+    // x-axis is the columns for different element definitions
     float size_of_cycle_as_percent_of_display = (duration_of_pause + duration_of_pulse) / duration_of_pulse;
     vec2 screen_location_adjusted_for_alignment_as_percent_of_display = get_display_location_as_percent_of_display_size(fragCoord);
     float current_location_on_y_axis_of_display_as_percent_of_display = screen_location_adjusted_for_alignment_as_percent_of_display.y;
@@ -759,12 +773,10 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
     float distance_of_current_location_behind_pulse_as_percent_of_display = distance_from_pulse.x;
     float distance_of_current_location_in_front_of_pulse_as_percent_of_display = distance_from_pulse.y;
     vec3 display_output_vector = zeros3d;
-
     
     
     // Calculate the column index of the current screen location
     int index_current_pulse = int(floor(screen_location_adjusted_for_alignment_as_percent_of_display.x * float(size_of_display_in_columns)));
-    
     
     
     // Copy some variables from the current pulse into local scope
@@ -776,10 +788,14 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
     float color_pulse_minimum_brightness_percent = pulse.color_pulse_minimum_brightness_percent;
     float size_of_display_in_leds = pulse.size_of_display_in_leds;
     float size_of_pulse_head_in_leds = pulse.size_of_pulse_head_in_leds;
+    float offset_of_whole_element_in_leds = pulse.offset_of_whole_element_in_leds;
+
+    // Assign local variable for colours of different parts of the cycle
     vec3 rgb_background = pulse.rgb_background;
     vec3 rgb_pause = pulse.rgb_pause;
     vec3 rgb_pulse = pulse.rgb_pulse;
     vec3 rgb_fade_in = pulse.rgb_fade_in;
+    vec3 rgb_fade_out = pulse.rgb_fade_out;
     
     // Set up some variables related to display
     float size_of_led_as_percent_of_display = (1.0 / size_of_display_in_leds);
@@ -804,26 +820,34 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
             size_of_led_as_percent_of_display, size_of_cycle_as_percent_of_display, 
             direction_movement_reversed);
     }
+
+
+    // Shift whole element by an offset
+    distance_of_current_location_behind_pulse_as_percent_of_display = get_offset_of_whole_element(
+        distance_of_current_location_behind_pulse_as_percent_of_display,
+        offset_of_whole_element_in_leds*size_of_led_as_percent_of_display,
+        size_of_cycle_as_percent_of_display);
+
     distance_of_current_location_in_front_of_pulse_as_percent_of_display = invert_value(
         distance_of_current_location_behind_pulse_as_percent_of_display, 
         size_of_cycle_as_percent_of_display);
 
-   
     
     // Shift head as a multiple of a full LED. +ive is behind pulse, -ive is in front of pulse.
     // 0.0 is the original behaviour: align start of head behind pulse index. 
     float head_offset_in_leds = 0.0;    
     
-    
     // Generate offsets of decay from head location
     //
     // head_buffer_leds = 0.0 results in full illumination of exactly 1 LED at a time with fade_in + decay pulse
     // head_buffer_leds > 0.0 will increase the area on either side of the pulse boundary that is at full brightness by the number of LED elements specified 
-    float head_buffer_leds = 0.0; 
+    float head_buffer_leds = 0.0;
+
     // 0.0 is original behaviour: align with head beginning at pulse index and trailing pulse
     // > 0.0 shifts the decay regions behind the pulse boundary
     // < 0.0 shifts the decay regions ahead of the pulse boundary
-    float head_buffer_alignment = 0.0;  
+    float head_buffer_alignment = 0.0;
+    
     if(!display_discrete_led_output){
         // Center head on pulse index in contiuous output mode
         //

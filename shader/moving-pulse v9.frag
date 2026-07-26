@@ -67,7 +67,7 @@ const vec3 grey =       vec3(0.5, 0.5, 0.5);
 const vec3 black =      vec3(0.0, 0.0, 0.0);
 
 // Debug
-const bool debug_master =                          true;
+const bool debug_master =                          false;
 const bool debug_add_overlay_colorshft =           false;
 //
 const bool debug_background =                      true;
@@ -88,20 +88,25 @@ struct Pulse_settings
 {
     vec3 rgb_pulse;                                                 // (R, G, B) Color for pulse
     vec3 rgb_pause;                                                 // (R, G, B) Color for negative space: non-pulse area
+    vec3 rgb_fade_out;                                              // (R, G, B) Color applied to fade-out behind pulse
     vec3 rgb_fade_in;                                               // (R, G, B) Color applied to fade-in in front of pulse
     vec3 rgb_background;                                            // (R, G, B) Color applied uniformly on top of others
     float size_of_display_in_leds;                                  // Set to the number of LEDs in your display in order to align other settings properly   
-    float size_pulse_head_in_leds;                                  // Non-decay area at the start of the pulse. Will run at brightness specified in rgb_pulse for the length of the number of LEDs specified
+    float size_of_pulse_head_in_leds;                               // Non-decay area at the start of the pulse. Will run at brightness specified in rgb_pulse for the length of the number of LEDs specified
     float decay_speed_exponential;                                  // 0.0 for no exponential decay. Higher number = faster decay, shorter / darker pulse.
     float decay_speed_linear;                                       // 0.0 for no linear decay. Higher number = faster decay, shorter / darker pulse.
     float fade_in_speed_exponential;                                // 0.0 for no exponential fade-in. Generate a fade-in on the LED before the pulse. Higher number = faster = shorter.
     float fade_in_speed_linear;                                     // 0.0 for no linear fade-in. Generate a fade-in on the LED before the pulse. Higher number = faster = shorter.
     float color_brightness_cutoff;                                  // switch to non-pulse, "pause" section of cycle coloring below this brightness.
     float color_pulse_minimum_brightness_percent;                   // Minimum brightness of pulse as a percent. Will not decay below this level.
-    float blended_fade_in_head_size;                                // Size in LED elements to use for blending fade-in colour to head colour.
+    float size_of_blending_zone_fade_in_to_head_as_percentage;      // Percentage of the pulse head used to blend fade-in colour to pulse head colour. Range: 0.0 to 1.0.
+    float size_of_blending_zone_head_to_fade_out_as_percentage;     // Percentage of the pulse head used to blend head colour to fade-out colour. Range: 0.0 to 1.0.
+    float offset_of_blending_zone_fade_in_to_head_as_percentage;    // Alignment of blending zone for fade-in to head. 0.0 = align to front, 1.0 = align to back.
+    float offset_of_whole_element_in_leds;                          // Advance or delay the timing of the entire element by a the specified number of LEDs
     bool color_brightness_cutoff_includes_background_brightness;    // Consider background coloring or not when determining the brightness of a pixel for cutoff to pause coloring.
     bool color_combine_background_with_pause_color;                 // Overlay the background color on top of the "pause" / negative space color.
-    bool color_combine_pulse_head_with_fade_in;                     // Smooth transition between fade-in and pulse head
+    bool color_blend_pulse_head_with_fade_out;                      // Smooth transition between fade-out and pulse head
+    bool color_blend_pulse_head_with_fade_in;                       // Smooth transition between fade-in and pulse head
     bool display_discrete_led_output;                               // Simulate LED display based on size_of_display_in_leds.
     bool fade_and_decay_first_and_last_led_only;                    // Only apply fade-in to the first LED before the pulse appears, and decay to the last LED after the pulse leaves. Requires display_discrete_led_output and either fade_in or decay.
 
@@ -140,7 +145,7 @@ void Initialize_pulse_settings_array(inout Pulse_settings pulse[size_of_display_
     pulse[0].rgb_fade_in = vec3(0.0, 0.0, 1.0);
     pulse[0].rgb_background = vec3(0.0, 0.0, 0.0);
     pulse[0].size_of_display_in_leds = 8.0; 
-    pulse[0].size_pulse_head_in_leds = 1.0;   
+    pulse[0].size_of_pulse_head_in_leds = 1.0;   
     pulse[0].decay_speed_exponential = 3.0;  
     pulse[0].decay_speed_linear = 0.0;   
     pulse[0].fade_in_speed_exponential = 16.0;  
@@ -206,14 +211,14 @@ vec2 get_decay_and_fade_offsets(
     float head_buffer_leds, 
     float head_buffer_alignment, 
     float size_of_led_as_percent_of_display, 
-    float size_pulse_head_in_leds){
+    float size_of_pulse_head_in_leds){
     // Alighment & buffer space between full-intensity section and fade-in / decay start for calculations.
     // Takes number of LEDs as inputs and returns percent of display
     //
     // head_buffer_leds: amount of space to extend / retract the fade & decay areas
     // head_buffer_alignment: shift the fade & decay areas forward or backward by this amount of LEDs
     // size_of_led_as_percent_of_display: number of LED elements in the display
-    // size_pulse_head_in_leds: size of full intensity area as a multiple of LEDs
+    // size_of_pulse_head_in_leds: size of full intensity area as a multiple of LEDs
     //
     // head_buffer_leds = 0.0, head_buffer_alignment = 0.5 : full illumination to exactly 1 LED element at a time and aligns LEDs to index of pulse
     // 
@@ -223,7 +228,7 @@ vec2 get_decay_and_fade_offsets(
     // Adjust default behavior to align start of calculation at the pulse index, trailing the pulse.
     // offset.x = trailing edge, offset.y = leading edge
     //
-    offset.x = ( (head_buffer_leds) / 2.0 ) + head_buffer_alignment + size_pulse_head_in_leds;
+    offset.x = ( (head_buffer_leds) / 2.0 ) + head_buffer_alignment + size_of_pulse_head_in_leds;
     offset.y = ( (head_buffer_leds) / 2.0 ) - head_buffer_alignment;
     offset = offset * size_of_led_as_percent_of_display;
     return offset;
@@ -444,7 +449,7 @@ vec3 generate_fade_in(float current_location_on_y_axis_of_display_as_percent_of_
     }
     else{
         float distance_of_current_location_in_front_of_pulse_adjusted_for_direction = distance_of_current_location_in_front_of_pulse_as_percent;
-        if(pulse.display_discrete_led_output && (pulse.size_pulse_head_in_leds <= 0.0)){
+        if(pulse.display_discrete_led_output && (pulse.size_of_pulse_head_in_leds <= 0.0)){
             // Shift calculated distance for intensity one LED toward the back of the pulse if discrete LED output is used and pulse has no head
             // I think it looks better without this option enabled
             if(debug_fade_in){
@@ -480,12 +485,12 @@ float generate_pulse_decay(
     float decay_speed_exponential = pulse.decay_speed_exponential;
     float decay_speed_linear = pulse.decay_speed_linear;
     float size_of_display_in_leds = pulse.size_of_display_in_leds;
-    float size_pulse_head_in_leds = pulse.size_pulse_head_in_leds;
+    float size_of_pulse_head_in_leds = pulse.size_of_pulse_head_in_leds;
     
     bool flag_generate_decay_linear = (decay_speed_linear > 0.0);
     bool flag_generate_decay_exponential = (decay_speed_exponential > 0.0);
     
-    float size_of_pulse_head_as_percent_of_display = (size_pulse_head_in_leds / size_of_display_in_leds);
+    float size_of_pulse_head_as_percent_of_display = (size_of_pulse_head_in_leds / size_of_display_in_leds);
     float decay_total;
 
 
@@ -566,9 +571,9 @@ float generate_head(
     float head_offset_as_percent_of_display, 
     Pulse_settings pulse){
     float size_of_display_in_leds = pulse.size_of_display_in_leds;
-    float size_pulse_head_in_leds = pulse.size_pulse_head_in_leds;
+    float size_of_pulse_head_in_leds = pulse.size_of_pulse_head_in_leds;
     float size_of_led_as_percent_of_display = (1.0 / size_of_display_in_leds);
-    float size_pulse_head_as_percent_of_display = size_of_led_as_percent_of_display * size_pulse_head_in_leds;
+    float size_pulse_head_as_percent_of_display = size_of_led_as_percent_of_display * size_of_pulse_head_in_leds;
     float head_factor = 0.0;        // Brightness intensity from 0.0 to 1.0
 
 
@@ -619,12 +624,14 @@ float generate_head(
 
 vec3 apply_minimum_brightness(
     vec3 color_at_current_location, 
-    Pulse_settings pulse){
+    Pulse_settings pulse
+    ){
     //enforce minimum brightness setting for pulse - do not decay below this intensity
     vec3 minimum_brightness_color;
     float brightness = dot(ones3d, color_at_current_location)/3.0;
     
-    if( brightness < pulse.color_pulse_minimum_brightness_percent){
+    if( brightness < pulse.color_pulse_minimum_brightness_percent)
+    {
         float rgb_pulse_brightness_sum = pulse.rgb_pulse.x + pulse.rgb_pulse.y + pulse.rgb_pulse.z;
         vec3 rgb_ratio = vec3((pulse.rgb_pulse.x / rgb_pulse_brightness_sum), (pulse.rgb_pulse.y / rgb_pulse_brightness_sum), (pulse.rgb_pulse.z / rgb_pulse_brightness_sum));
         minimum_brightness_color = (rgb_ratio * pulse.color_pulse_minimum_brightness_percent * 3.0);
@@ -652,10 +659,10 @@ vec3 generate_rgb_output_column(Pulse_settings pulse, vec2 screen_location_adjus
     
     float distance_of_current_location_behind_start_of_led_in_percent;
 
-    float size_pulse_head_in_leds = pulse.size_pulse_head_in_leds;
+    float size_of_pulse_head_in_leds = pulse.size_of_pulse_head_in_leds;
     float size_of_display_in_leds = pulse.size_of_display_in_leds;
     float size_of_led_as_percent_of_display = ( 1.0 / size_of_display_in_leds );
-    float size_of_pulse_head_as_percent_of_display = size_of_led_as_percent_of_display * size_pulse_head_in_leds;
+    float size_of_pulse_head_as_percent_of_display = size_of_led_as_percent_of_display * size_of_pulse_head_in_leds;
     float ratio_of_display_size_to_pulse_tail_size = 1.0 / (1.0 - size_of_pulse_head_as_percent_of_display);
     float distance_of_pulse_from_front_of_current_led_as_percent_of_led;
     float distance_of_pulse_from_back_of_current_led_as_percent_of_led;
@@ -681,7 +688,7 @@ vec3 generate_rgb_output_column(Pulse_settings pulse, vec2 screen_location_adjus
     // Set up fade_and_decay_first_and_last_led_only mod.
     // Should result in only 1 LED having any illumination at a time, fade-in at the start and / or decay at the end.
     if( pulse.fade_and_decay_first_and_last_led_only && ( flag_generate_decay || flag_generate_fade_in ) ){
-        size_pulse_head_in_leds = 0.0;
+        size_of_pulse_head_in_leds = 0.0;
         fade_and_decay_first_and_last_led_only = true;
     }
 
@@ -751,7 +758,7 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
         size_of_cycle_as_percent_of_display);
     float distance_of_current_location_behind_pulse_as_percent_of_display = distance_from_pulse.x;
     float distance_of_current_location_in_front_of_pulse_as_percent_of_display = distance_from_pulse.y;
-    vec3 display_output_vector;
+    vec3 display_output_vector = zeros3d;
 
     
     
@@ -768,7 +775,7 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
     float color_brightness_cutoff = pulse.color_brightness_cutoff;
     float color_pulse_minimum_brightness_percent = pulse.color_pulse_minimum_brightness_percent;
     float size_of_display_in_leds = pulse.size_of_display_in_leds;
-    float size_pulse_head_in_leds = pulse.size_pulse_head_in_leds;
+    float size_of_pulse_head_in_leds = pulse.size_of_pulse_head_in_leds;
     vec3 rgb_background = pulse.rgb_background;
     vec3 rgb_pause = pulse.rgb_pause;
     vec3 rgb_pulse = pulse.rgb_pulse;
@@ -776,7 +783,7 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
     
     // Set up some variables related to display
     float size_of_led_as_percent_of_display = (1.0 / size_of_display_in_leds);
-    float size_pulse_head_as_percent_of_display = size_of_led_as_percent_of_display * size_pulse_head_in_leds;
+    float size_pulse_head_as_percent_of_display = size_of_led_as_percent_of_display * size_of_pulse_head_in_leds;
 
     // Generate LED map and distance from each screen location behind the start of the LED it is a part of,
     // adjusted for the direction of movement
@@ -831,7 +838,7 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
         head_buffer_leds, 
         head_buffer_alignment, 
         size_of_led_as_percent_of_display, 
-        size_pulse_head_in_leds);
+        size_of_pulse_head_in_leds);
     
 
 
@@ -842,12 +849,12 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
     // Generate head
     if(color_combine_pulse_head_with_fade_in){
         // Adjust head placement when combining head with fade-in colours.
-        //head_offset_in_leds -= size_pulse_head_in_leds;
+        //head_offset_in_leds -= size_of_pulse_head_in_leds;
     }
 
     bool head_is_defined = define_led_element_at_offset_from_pulse_index(
         head_offset_in_leds, 
-        size_pulse_head_in_leds, 
+        size_of_pulse_head_in_leds, 
         size_of_display_in_leds, 
         distance_of_current_location_in_front_of_pulse_as_percent_of_display, 
         distance_of_current_location_behind_pulse_as_percent_of_display

@@ -16,7 +16,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord);
 // - - Inverse brightness mode
 // - - Set fixed or rotated color at specific LED position
 //
-// To-do
+// To-do:
 // - Fix pulse[6] device 7 configuration: head decay
 // -- enabled in configuration via bool color_combine_pulse_head_with_fade_in
 // -- should work similarly to pulse[4] device 5 but in the head instead of behind the pulse
@@ -26,7 +26,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord);
 // - - Especially for blending pulse head to fade-in
 // - Write better variable names for get_decay_and_fade_offsets()
 // - Implement head offset & head buffer column settings
-
+// Note: work being done mainly in debug section so features can be switched on & off individually for testing
 
 
 
@@ -40,7 +40,7 @@ const bool direction_movement_reversed = true;
 //const float duration_of_pause = 5.0;   //  Time between the front of the pulse leaving the screen and the next pulse appearing
 const float duration_of_pause = 0.0;   // disable pause while testing fade
 const float duration_of_pulse = 3.0;    // Time taken for the front of the pulse to run across the display
-const float speed_global_modifier = .02;    // When set to 1.0, cycle will play at 1 second per unit of duration
+const float speed_global_modifier = .01;    // When set to 1.0, cycle will play at 1 second per unit of duration
 //
 //
 // End User Config Section
@@ -103,7 +103,7 @@ struct Pulse_settings
     bool color_combine_background_with_pause_color;                 // Overlay the background color on top of the "pause" / negative space color.
     bool color_combine_pulse_head_with_fade_in;                     // Smooth transition between fade-in and pulse head
     bool display_discrete_led_output;                               // Simulate LED display based on size_of_display_in_leds.
-    bool fade_and_decay_first_and_last_led_only;                    // Only apply fade-in to the first LED before the pulse appears, and to the last LED after the pulse leaves. Requires display_discrete_led_output and either fade_in or decay.
+    bool fade_and_decay_first_and_last_led_only;                    // Only apply fade-in to the first LED before the pulse appears, and decay to the last LED after the pulse leaves. Requires display_discrete_led_output and either fade_in or decay.
 
 };
 
@@ -116,19 +116,19 @@ void Initialize_pulse_settings_array(inout Pulse_settings pulse[size_of_display_
     // Use order of variables listed above in "struct Pulse_settings"
     //                                                                                                              LEDs in |Pulse |Decay|Decay|Fade |Fade | Bright | Min    | blend | Cufoff | BG + | Head+| LED   | 1st+ 
     //                              Pulse-color  |  Pause-color         | Fade-in color       | Background-color  | Display | Head | Exp | Lin | Exp | Lin | Cutoff | Bright | size  | BG     | Pause| Fade | Output| last
-    pulse[0]  = Pulse_settings(vec3(1.0, 0.0, 0.0 ), vec3(0.0, 0.0, 0.05), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 5.0,      1.0,   3.0,  0.0,  0.0,   0.0,  0.025,   0.0,   0.0,    false,  true, false,  false,   false);     // Device 1
-    pulse[1]  = Pulse_settings(vec3(1.0, 0.75, 0.0), vec3(0.0, 0.0, 0.05), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 3.0,      1.0,   3.0,  0.0,  0.0,   0.0,  0.025,   0.0,   0.0,    false,  true, false,  false,   false);     // Device 2
-    pulse[2]  = Pulse_settings(vec3(1.0, 1.0, 0.0 ), vec3(0.0, 0.0, 0.1 ), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 3.0,      2.0,   3.0,  0.0,  0.0,   0.0,  0.025,   0.0,   0.0,    false,  true, false,  false,   false);     // Device 3
-    pulse[3]  = Pulse_settings(vec3(0.0, 1.0, 0.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 14.0,     1.0,   3.0,  0.0,  14.0,  0.0,  0.025,   0.0,   0.0,    false,  true, false,  false,   false);     // Device 4
-    pulse[4]  = Pulse_settings(vec3(0.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0), 8.0,      1.0,   3.0,  0.0,  0.0,   0.0,  0.025,   0.0,   0.0,    false,  true, false,  false,   false);     // Device 5
-    pulse[5]  = Pulse_settings(vec3(0.0, 1.0, 1.0 ), vec3(0.0, 0.0, 0.5 ), vec3(0.0, 0.0, 0.0), vec3(0.0, 0.0, 0.0), 8.0,      1.0,   3.0,  0.0,  0.0,   0.0,  0.1,     0.0,   0.0,    false,  true, false,  false,   false);     // Device 6
-    pulse[6]  = Pulse_settings(vec3(0.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.5, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 8.0,      1.0,   3.0,  0.0, 64.0,   0.0,  0.025,   0.0,   0.0,    false,  true, true,   false,   false);     // Device 7
-//    pulse[7]  = Pulse_settings(vec3(1.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 3.0,      1.0,   3.0,  0.0,  1.0,   3.0,  0.025,   0.0,   0.0,    false,  true, false,  true,   true );     // Device 8
-//    pulse[8]  = Pulse_settings(vec3(0.5, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.5, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 4.0,      0.0,   0.0,  1.0,  0.0,   1.0,  0.025,   0.0,   0.0,    false,  true, false,  true,   false );    // Device 9
-    pulse[7]  = Pulse_settings(vec3(1.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 2.0,      1.0,   3.0,  0.0,  1.0,   3.0,  0.025,   0.0,   0.0,    false,  true, false,  false,   true );     // Device 8
-    pulse[8]  = Pulse_settings(vec3(1.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 2.0,      1.0,   3.0,  0.0,  1.0,   3.0,  0.025,   0.0,   0.0,    false,  true, false,  false,  false );    // Device 9
-    pulse[9]  = Pulse_settings(vec3(1.0, 1.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 1.0, 1.0), vec3(0.0, 0.0, 0.0), 4.0,      0.0,   9.0,  0.0,  9.0,   0.0,  0.025,   0.0,   0.0,    false,  true, false,  false,  false );    // Device 10
-    pulse[10] = Pulse_settings(vec3(1.0, 1.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 1.0, 1.0), vec3(0.0, 0.0, 0.0), 4.0,      0.0,   0.0,  1.5,  0.0,   0.0,  0.025,   0.3,   0.0,    false,  true, false,  false,  false );    // Device 11
+    pulse[0]  = Pulse_settings(vec3(1.0, 0.0, 0.0 ), vec3(0.0, 0.0, 0.05), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 5.0,      1.0,   3.0,  0.0,  0.0,   0.0,  0.025,   0.0,   0.0,    false,  true,  false,  false,   false);     // Device 1
+    pulse[1]  = Pulse_settings(vec3(1.0, 0.75, 0.0), vec3(0.0, 0.0, 0.05), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 3.0,      1.0,   3.0,  0.0,  0.0,   0.0,  0.025,   0.0,   0.0,    false,  true,  false,  false,   false);     // Device 2
+    pulse[2]  = Pulse_settings(vec3(1.0, 1.0, 0.0 ), vec3(0.0, 0.0, 0.1 ), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 3.0,      2.0,   3.0,  0.0,  0.0,   0.0,  0.025,   0.0,   0.0,    false,  true,  false,  false,   false);     // Device 3
+    pulse[3]  = Pulse_settings(vec3(0.0, 1.0, 0.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0), 14.0,     1.0,   3.0,  0.0,  14.0,  0.0,  0.025,   0.0,   0.0,    false,  true,  false,  false,   false);     // Device 4
+    pulse[4]  = Pulse_settings(vec3(0.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0), 8.0,      1.0,   3.0,  0.0,  0.0,   0.0,  0.025,   0.0,   0.0,    false,  true,  false,  false,   false);     // Device 5
+    pulse[5]  = Pulse_settings(vec3(0.0, 1.0, 1.0 ), vec3(0.0, 0.0, 0.5 ), vec3(0.0, 0.0, 0.0), vec3(0.0, 0.0, 0.0), 8.0,      1.0,   3.0,  0.0,  0.0,   0.0,  0.1,     0.0,   0.0,    false,  true,  false,  false,   false);     // Device 6
+    pulse[6]  = Pulse_settings(vec3(0.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.5, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 8.0,      1.0,   3.0,  0.0, 64.0,   0.0,  0.025,   0.0,   0.0,    false,  true,  true,   false,   false);     // Device 7
+//    pulse[7]  = Pulse_settings(vec3(1.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 3.0,      1.0,   3.0,  0.0,  1.0,   3.0,  0.025,   0.0,   0.0,    false,  true,  false,  true,   true );     // Device 8
+//    pulse[8]  = Pulse_settings(vec3(0.5, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(0.5, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 4.0,      0.0,   0.0,  1.0,  0.0,   1.0,  0.025,   0.0,   0.0,    false,  true,  false,  true,   false );    // Device 9
+    pulse[7]  = Pulse_settings(vec3(1.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 2.0,      1.0,   3.0,  0.0,  1.0,   3.0,  0.025,   0.0,   0.0,    false,  true,  false,  false,   true );     // Device 8
+    pulse[8]  = Pulse_settings(vec3(1.0, 0.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 2.0,      1.0,   3.0,  0.0,  1.0,   3.0,  0.025,   0.0,   0.0,    false,  true,  false,  false,  false );    // Device 9
+    pulse[9]  = Pulse_settings(vec3(1.0, 1.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 1.0, 1.0), vec3(0.0, 0.0, 0.0), 4.0,      0.0,   9.0,  0.0,  9.0,   0.0,  0.025,   0.0,   0.0,    false,  true,  false,  false,  false );    // Device 10
+    pulse[10] = Pulse_settings(vec3(1.0, 1.0, 1.0 ), vec3(0.0, 0.0, 0.0 ), vec3(1.0, 1.0, 1.0), vec3(0.0, 0.0, 0.0), 4.0,      0.0,   0.0,  1.5,  0.0,   0.0,  0.025,   0.3,   0.0,    false,  true,  false,  false,  false );    // Device 11
 
 
     /*
@@ -751,7 +751,6 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
         size_of_cycle_as_percent_of_display);
     float distance_of_current_location_behind_pulse_as_percent_of_display = distance_from_pulse.x;
     float distance_of_current_location_in_front_of_pulse_as_percent_of_display = distance_from_pulse.y;
-    
     vec3 display_output_vector;
 
     
@@ -842,8 +841,10 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
  
     // Generate head
     if(color_combine_pulse_head_with_fade_in){
-        // Do something different when blending the fade in to the pulse head
+        // Adjust head placement when combining head with fade-in colours.
+        //head_offset_in_leds -= size_pulse_head_in_leds;
     }
+
     bool head_is_defined = define_led_element_at_offset_from_pulse_index(
         head_offset_in_leds, 
         size_pulse_head_in_leds, 
@@ -851,7 +852,9 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
         distance_of_current_location_in_front_of_pulse_as_percent_of_display, 
         distance_of_current_location_behind_pulse_as_percent_of_display
     );
-    float head_factor = 0.0;
+
+    //head_factor defines the brightness of areas that are defined as the head of the pulse, from 0.0 to 1.0
+    float head_factor = 0.0;        
     if(head_is_defined && color_combine_pulse_head_with_fade_in){
         // Not working as intended - probably need to offset area that head is defined, either negative to the current offset or one screen length minus the size of the head
         head_factor =  (distance_of_current_location_behind_pulse_as_percent_of_display / size_pulse_head_as_percent_of_display);

@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+# Inputs: ENV_FILE points to a key=value environment file. ROUTER_IP and SNMP_COMMUNITY identify the router. ROUTER_UPTIME_OID is an SNMP TimeTicks OID. SIP_HOST and SIP_PORT identify the TPG signalling target. TRUNK_NAME identifies the PJSIP registration. State and timing entries control detection, retry, and cooldown behaviour.
+# Outputs: ROUTER_REBOOT_STATE_FILE records the latest router uptime and recovery state. Journal entries use tag freepbx-tpg-router-reboot-recover. Exit status 0 means no action was required or recovery completed; nonzero means configuration, observation, or recovery failed.
+# Functions: load_env reads configuration. log writes journal entries. run executes commands. snmp_uptime_ticks reads router uptime. trunk_call_active protects active calls. sip_ready checks signalling reachability. force_registration runs the existing registration recovery. load_state and save_state persist detection state. main detects an uptime rollback and performs recovery after connectivity returns.
+
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ENV_FILE = os.environ.get('ENV_FILE', '/etc/freepbx-wanip-hosts/freepbx-tpg-router-reboot-recover.env')
+
+
+def load_env(path):
+    values = {}
+    with open(path, 'r', encoding='utf-8') as handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, value = line.split('=', 1)
+            values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def log(message):
+    subprocess.run(['logger', '-t', 'freepbx-tpg-router-reboot-recover', message], check=False)
+
+
+def run(args, env=None):
+    return subprocess.run(args, capture_output=True, text=True, env=env)
+
+
+def load_state(path):
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+
+
+def save_state(path, state):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+    os.replace(temporary, path)
+
+
+def snmp_uptime_ticks(cfg):
+    result = run([
+        cfg['SNMPGET'], '-v2c', '-c', cfg['SNMP_COMMUNITY'], '-Ovq',
+        cfg['ROUTER_IP'], cfg['ROUTER_UPTIME_OID']
+    ])
+    if result.returncode != 0:
+        return None
+    output = result.stdout.strip()
+    parenthesized = re.search(r'\((\d+)\)', output)
+    if parenthesized:
+        return int(parenthesized.group(1))
+    numeric = re.search(r'\b(\d+)\b', output)
+    return int(numeric.group(1)) if numeric else None
+
+
+def trunk_call_active(cfg):
+    result = run(['asterisk', '-rx', 'core show channels concise'])
+    return f"PJSIP/{cfg['TRUNK_NAME']}-" in result.stdout
+
+
+def sip_ready(cfg):
+    try:
+        addresses = socket.getaddrinfo(cfg['SIP_HOST'], int(cfg['SIP_PORT']), socket.AF_INET, socket.SOCK_DGRAM)
+    except socket.gaierror:
+        return False
+    timeout = max(1, int(float(cfg['SIP_READY_TIMEOUT_SECONDS'])))
+    checked = set()
+    for address in addresses:
+        node = address[4][0]
+        if node in checked:
+            continue
+        checked.add(node)
+        result = run(['ping', '-c', '1', '-W', str(timeout), node])
+        if result.returncode == 0:
+            return True
+    return False
+
+
+def force_registration(cfg):
+    env = os.environ.copy()
+    env['FORCE_INITIAL_REGISTER'] = 'yes'
+    env['ASTERISK_RESTART_ON_REGISTRATION_FAILURE'] = 'no'
+    return subprocess.run([cfg['REGISTRATION_RECOVERY_SCRIPT']], env=env).returncode
+
+
+def main():
+    if not os.path.exists(ENV_FILE):
+        log(f'environment file not readable: {ENV_FILE}')
+        return 10
+    values = load_env(ENV_FILE)
+    defaults = {
+        'SNMPGET': '/usr/bin/snmpget',
+        'ROUTER_UPTIME_OID': '1.3.6.1.2.1.1.3.0',
+        'TRUNK_NAME': 'TPG-VoIP',
+        'SIP_HOST': 'uni-v1.tpg.com.au',
+        'SIP_PORT': '5060',
+        'SIP_READY_TIMEOUT_SECONDS': '2',
+        'ROUTER_REBOOT_STATE_FILE': '/etc/freepbx-wanip-hosts/router-reboot-recovery-state.json',
+        'ROUTER_REBOOT_MIN_DROP_TICKS': '3000',
+        'ROUTER_REBOOT_RECOVERY_COOLDOWN_SECONDS': '300',
+        'ROUTER_REBOOT_WAIT_TIMEOUT_SECONDS': '300',
+        'ROUTER_REBOOT_WAIT_INTERVAL_SECONDS': '5',
+        'REGISTRATION_RECOVERY_SCRIPT': '/usr/local/sbin/freepbx-wanip-registration-recover'
+    }
+    cfg = {**defaults, **values}
+    for required in ('ROUTER_IP', 'SNMP_COMMUNITY'):
+        if not cfg.get(required):
+            log(f'missing required setting: {required}')
+            return 11
+
+    state_path = Path(cfg['ROUTER_REBOOT_STATE_FILE'])
+    state = load_state(state_path)
+    previous = state.get('last_uptime_ticks')
+    current = snmp_uptime_ticks(cfg)
+    now = int(time.time())
+    if current is None:
+        state['router_unreachable_since'] = state.get('router_unreachable_since', now)
+        save_state(state_path, state)
+        return 0
+
+    reboot_detected = False
+    if isinstance(previous, int):
+        reboot_detected = current + int(cfg['ROUTER_REBOOT_MIN_DROP_TICKS']) < previous
+    if state.get('router_unreachable_since') and current < int(cfg['ROUTER_REBOOT_MIN_DROP_TICKS']):
+        reboot_detected = True
+
+    state['last_uptime_ticks'] = current
+    state.pop('router_unreachable_since', None)
+    save_state(state_path, state)
+    if not reboot_detected:
+        return 0
+
+    last_recovery = int(state.get('last_recovery_epoch', 0))
+    cooldown = int(cfg['ROUTER_REBOOT_RECOVERY_COOLDOWN_SECONDS'])
+    if now - last_recovery < cooldown:
+        log(f'router reboot detected but recovery cooldown has {cooldown - (now - last_recovery)}s remaining')
+        return 0
+
+    log(f'router reboot detected from uptime rollback previous={previous} current={current}')
+    deadline = time.time() + int(cfg['ROUTER_REBOOT_WAIT_TIMEOUT_SECONDS'])
+    interval = int(cfg['ROUTER_REBOOT_WAIT_INTERVAL_SECONDS'])
+    while time.time() < deadline:
+        if trunk_call_active(cfg):
+            log('trunk call active; router-reboot registration recovery deferred')
+            return 0
+        if sip_ready(cfg):
+            rc = force_registration(cfg)
+            state = load_state(state_path)
+            state['last_recovery_epoch'] = int(time.time())
+            state['last_recovery_exit'] = rc
+            save_state(state_path, state)
+            log(f'router-reboot forced registration recovery exited {rc}')
+            return rc
+        time.sleep(interval)
+
+    log('router reboot detected but TPG SIP signalling did not become ready before timeout')
+    return 12
+
+
+if __name__ == '__main__':
+    sys.exit(main())

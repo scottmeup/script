@@ -1,0 +1,10 @@
+# Input: /etc/freepbx-wanip-hosts/freepbx-tpg-router-reboot-recover.env
+# Output: router reboot state JSON and journal entries.
+[Unit]
+Description=Recover TPG registration after router reboot
+After=network-online.target asterisk.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/freepbx-tpg-router-reboot-recover

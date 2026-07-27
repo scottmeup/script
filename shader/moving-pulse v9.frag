@@ -207,6 +207,18 @@ float distance_with_mod(
 }
 
 
+float get_offset_of_whole_element(
+    float current_location,
+    float size_to_offset_by, 
+    float size_of_cycle)
+// Takes current location of element, the amount to offset it by, and the size of the cycle.
+// +ive size_to_offset_by delays the position
+// -ive size_to_offset_by advances the position
+{
+    float offset_position = mod(current_location-size_to_offset_by, size_of_cycle);
+    return offset_position;
+}
+
 vec2 get_decay_and_fade_offsets(
     float head_buffer_leds, 
     float head_buffer_alignment, 
@@ -647,6 +659,15 @@ float get_brightness_of_color(vec3 color){
 }
 
 
+vec3 get_blended_color(
+    vec3 color1,
+    vec3 color2,
+    float color2_percent)
+{
+    // placeholder value for return
+    return zeros3d;
+}
+
 /*
 vec3 generate_rgb_output_column(Pulse_settings pulse, vec2 screen_location_adjusted_for_alignment_as_percent_of_display, float position_of_pulse_as_percent_of_display){
 
@@ -737,17 +758,7 @@ vec3 generate_rgb_output_column(Pulse_settings pulse, vec2 screen_location_adjus
 }
 */
 
-float get_offset_of_whole_element(
-    float current_location,
-    float size_to_offset_by, 
-    float size_of_cycle)
-// Takes current location of element, the amount to offset it by, and the size of the cycle.
-// +ive size_to_offset_by delays the position
-// -ive size_to_offset_by advances the position
-{
-    float offset_position = mod(current_location-size_to_offset_by, size_of_cycle);
-    return offset_position;
-}
+
 
 
 

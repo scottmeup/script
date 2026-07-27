@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Input: source directory containing this installer, the manifest, and every manifest-listed file. Environment files are copied without prompting or modification.
+# Outputs: scripts in /usr/local/sbin, configuration in /etc/freepbx-wanip-hosts, units in /etc/systemd/system, enabled current services/timers, and disabled legacy/overlapping timers.
+# Functions: install_script, install_env, and install_systemd install each class with fixed ownership and permissions. The top-level process verifies the complete manifest before changing the system.
+set -euo pipefail
+SRC_DIR="${SOURCE_DIR:-$(pwd -P)}"
+MANIFEST_FILE="${MANIFEST_FILE:-$SRC_DIR/freepbx-tpg-sip-system-manifest.txt}"
+ETC_DIR=/etc/freepbx-wanip-hosts
+SBIN_DIR=/usr/local/sbin
+SYSTEMD_DIR=/etc/systemd/system
+PCAP_DIR=/var/log/tpg-sip-pcap
+[ "$(id -u)" -eq 0 ] || { echo "ERROR: run as root" >&2; exit 1; }
+[ -r "$MANIFEST_FILE" ] || { echo "ERROR: manifest not readable: $MANIFEST_FILE" >&2; exit 19; }
+required_files=()
+while IFS= read -r raw_line || [ -n "$raw_line" ]; do
+  line="$(printf '%s' "$raw_line" | sed 's/[[:space:]]*#.*$//' | xargs)"
+  [ -n "$line" ] && required_files+=("$line")
+done < "$MANIFEST_FILE"
+missing=()
+for file in "${required_files[@]}"; do [ -f "$SRC_DIR/$file" ] || missing+=("$file"); done
+if [ "${#missing[@]}" -gt 0 ]; then
+  echo "ERROR: installation halted. Missing required files in $SRC_DIR:" >&2
+  printf '  %s\n' "${missing[@]}" >&2
+  exit 20
+fi
+mkdir -p "$ETC_DIR" "$SBIN_DIR" "$SYSTEMD_DIR" "$PCAP_DIR" "$ETC_DIR/tpg-sip-health-state" "$ETC_DIR/router-powercycle-state" "$ETC_DIR/tpg-node-health-state" "$ETC_DIR/outbound-failure-state"
+install_script() { install -o root -g root -m 750 "$SRC_DIR/$1" "$SBIN_DIR/$1"; }
+install_env() { install -o root -g root -m 640 "$SRC_DIR/$1" "$ETC_DIR/$1"; }
+install_systemd() { install -o root -g root -m 644 "$SRC_DIR/$1" "$SYSTEMD_DIR/$1"; }
+for file in "${required_files[@]}"; do
+  case "$file" in *.service|*.timer) install_systemd "$file";; *.env) install_env "$file";; *) install_script "$file";; esac
+done
+if getent group tcpdump >/dev/null; then chown root:tcpdump "$PCAP_DIR"; else chown root:adm "$PCAP_DIR"; fi
+chmod 2770 "$PCAP_DIR"
+for script in freepbx-wanip-hosts-update freepbx-wanip-registration-recover freepbx-wanip-registration-watchdog freepbx-tpg-router-powercycle-guard freepbx-tpg-sip-health-policy-watch tpg-sip-error-monitor; do bash -n "$SBIN_DIR/$script"; done
+for script in freepbx-tpg-router-reboot-recover freepbx-tpg-sip-health-check freepbx-tpg-sip-health-policy freepbx-tpg-outbound-failure-recover; do python3 -m py_compile "$SBIN_DIR/$script"; done
+systemctl daemon-reload
+systemctl enable --now tpg-sip-pcap.service tpg-sip-error-monitor.service freepbx-wanip-hosts-update.timer freepbx-wanip-registration-watchdog.timer freepbx-tpg-sip-health-check.timer freepbx-tpg-sip-health-policy.timer freepbx-tpg-sip-health-policy-watch.service freepbx-tpg-outbound-failure-recover.timer freepbx-tpg-router-reboot-recover.timer
+systemctl disable --now freepbx-tpg-router-powercycle-guard.timer freepbx-tpg-node-health-update.timer freepbx-tpg-node-selector.timer >/dev/null 2>&1 || true
+"$SBIN_DIR/freepbx-tpg-router-reboot-recover" >/dev/null || true
+"$SBIN_DIR/freepbx-tpg-sip-health-check" >/dev/null || true
+"$SBIN_DIR/freepbx-tpg-sip-health-policy" >/dev/null || true
+"$SBIN_DIR/freepbx-tpg-outbound-failure-recover" >/dev/null || true
+cat <<REPORT
+Install completed.
+Enabled: packet capture, error monitor, WAN host updates, registration watchdog, SIP health checks/policy/watch, staged outbound recovery, and router-reboot recovery.
+Disabled: standalone router-powercycle guard timer, legacy node-health timer, and draft node-selector timer. Their files are retained for rollback where present.
+Environment files were copied as-is without prompts.
+REPORT

@@ -1,0 +1,35 @@
+# FreePBX TPG SIP system installer manifest
+# One required source filename per non-comment line.
+freepbx-wanip-hosts-update
+freepbx-wanip-registration-recover
+freepbx-wanip-registration-watchdog
+freepbx-tpg-router-powercycle-guard
+freepbx-tpg-router-reboot-recover
+freepbx-tpg-sip-health-check
+freepbx-tpg-sip-health-policy
+freepbx-tpg-sip-health-policy-watch
+freepbx-tpg-outbound-failure-recover
+tpg-sip-error-monitor
+freepbx-wanip-hosts.env
+freepbx-tpg-router-powercycle.env
+freepbx-tpg-router-reboot-recover.env
+freepbx-tpg-sip-health.env
+freepbx-tpg-sip-health-policy.env
+freepbx-tpg-outbound-failure-recover.env
+freepbx-wanip-hosts-update.service
+freepbx-wanip-hosts-update.timer
+freepbx-wanip-registration-watchdog.service
+freepbx-wanip-registration-watchdog.timer
+freepbx-tpg-router-powercycle-guard.service
+freepbx-tpg-router-powercycle-guard.timer
+freepbx-tpg-router-reboot-recover.service
+freepbx-tpg-router-reboot-recover.timer
+freepbx-tpg-sip-health-check.service
+freepbx-tpg-sip-health-check.timer
+freepbx-tpg-sip-health-policy.service
+freepbx-tpg-sip-health-policy.timer
+freepbx-tpg-sip-health-policy-watch.service
+freepbx-tpg-outbound-failure-recover.service
+freepbx-tpg-outbound-failure-recover.timer
+tpg-sip-pcap.service
+tpg-sip-error-monitor.service

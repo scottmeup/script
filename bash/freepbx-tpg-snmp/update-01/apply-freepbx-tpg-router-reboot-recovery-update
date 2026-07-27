@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Inputs: the six update files in the same source directory as this script.
+# Outputs: installs the router-reboot detector, replaces outbound-failure recovery and its environment, enables their timers, disables the overlapping standalone power-cycle guard timer and incomplete selector timer, and prints verification commands.
+# Functions: top-level validation checks every required source before any installation. install commands apply fixed ownership and permissions. Syntax checks and systemd reload occur before units are enabled.
+set -euo pipefail
+SRC_DIR="${SOURCE_DIR:-$(pwd -P)}"
+required=(
+  freepbx-tpg-router-reboot-recover
+  freepbx-tpg-router-reboot-recover.env
+  freepbx-tpg-router-reboot-recover.service
+  freepbx-tpg-router-reboot-recover.timer
+  freepbx-tpg-outbound-failure-recover
+  freepbx-tpg-outbound-failure-recover.env
+)
+[ "$(id -u)" -eq 0 ] || { echo "ERROR: run as root" >&2; exit 1; }
+missing=()
+for file in "${required[@]}"; do [ -f "$SRC_DIR/$file" ] || missing+=("$file"); done
+if [ "${#missing[@]}" -gt 0 ]; then printf 'ERROR: missing %s\n' "${missing[@]}" >&2; exit 20; fi
+install -o root -g root -m 750 "$SRC_DIR/freepbx-tpg-router-reboot-recover" /usr/local/sbin/freepbx-tpg-router-reboot-recover
+install -o root -g root -m 640 "$SRC_DIR/freepbx-tpg-router-reboot-recover.env" /etc/freepbx-wanip-hosts/freepbx-tpg-router-reboot-recover.env
+install -o root -g root -m 644 "$SRC_DIR/freepbx-tpg-router-reboot-recover.service" /etc/systemd/system/freepbx-tpg-router-reboot-recover.service
+install -o root -g root -m 644 "$SRC_DIR/freepbx-tpg-router-reboot-recover.timer" /etc/systemd/system/freepbx-tpg-router-reboot-recover.timer
+install -o root -g root -m 750 "$SRC_DIR/freepbx-tpg-outbound-failure-recover" /usr/local/sbin/freepbx-tpg-outbound-failure-recover
+install -o root -g root -m 640 "$SRC_DIR/freepbx-tpg-outbound-failure-recover.env" /etc/freepbx-wanip-hosts/freepbx-tpg-outbound-failure-recover.env
+python3 -m py_compile /usr/local/sbin/freepbx-tpg-router-reboot-recover /usr/local/sbin/freepbx-tpg-outbound-failure-recover
+systemctl daemon-reload
+systemctl disable --now freepbx-tpg-router-powercycle-guard.timer freepbx-tpg-node-selector.timer >/dev/null 2>&1 || true
+systemctl enable --now freepbx-tpg-router-reboot-recover.timer freepbx-tpg-outbound-failure-recover.timer
+systemctl start freepbx-tpg-router-reboot-recover.service
+cat <<REPORT
+Update installed.
+Enabled:
+  freepbx-tpg-router-reboot-recover.timer
+  freepbx-tpg-outbound-failure-recover.timer
+Disabled:
+  freepbx-tpg-router-powercycle-guard.timer
+  freepbx-tpg-node-selector.timer
+Retained for rollback:
+  existing router-powercycle guard files
+  existing selector files, if present
+Verify:
+  systemctl status freepbx-tpg-router-reboot-recover.timer -l --no-pager
+  systemctl status freepbx-tpg-outbound-failure-recover.timer -l --no-pager
+  journalctl -t freepbx-tpg-router-reboot-recover -n 50 --no-pager
+  journalctl -t freepbx-tpg-outbound-recover -n 50 --no-pager
+REPORT

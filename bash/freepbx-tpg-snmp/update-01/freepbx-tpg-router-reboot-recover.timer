@@ -1,0 +1,12 @@
+# Runs the router reboot detector every 30 seconds as a fallback and primary reboot trigger.
+[Unit]
+Description=Check for TPG router reboot
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=30
+AccuracySec=5
+Unit=freepbx-tpg-router-reboot-recover.service
+
+[Install]
+WantedBy=timers.target

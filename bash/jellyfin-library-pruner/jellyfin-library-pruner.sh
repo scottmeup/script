@@ -2,33 +2,49 @@
 # jellyfin-library-pruner.sh
 # Project-level summary:
 # - Cleans Jellyfin movie/show library folders when trickplay images and sidecars are stored beside media files.
-# - Reads a dotenv-style config file, scans configured movie and show roots, prints dry-run actions by default, and performs deletion only when DELETE_MODE=true.
+# - Reads a dotenv-style config file, scans configured movie and show roots, logs actions to terminal, file, or both, and performs deletion only when DRY_RUN_MODE=false.
+# - When DRY_RUN_MODE=true, it writes a separate configurable dry-run deletion list containing every path that would be removed if DRY_RUN_MODE=false.
 # - Movie roots contain one movie folder per direct child. Show roots contain one show folder per direct child. Show folders contain season folders matching SEASON_DIR_GLOB.
 # Inputs:
 # - ENV_FILE: optional path to the dotenv config file. Defaults to ./.env. Used by main.
 # - MOVIE_PATHS: colon-separated movie library roots. Each direct child is one movie folder. Used by process_movie_root.
 # - SHOW_PATHS: colon-separated show library roots. Each direct child is one show folder. Used by process_show_root.
-# - TV_PATHS: backward-compatible alias for SHOW_PATHS if SHOW_PATHS is empty. Used by main.
 # - VIDEO_EXTENSIONS: space-separated playable media extensions without leading dots. Used by has_recursive_video, is_video_file, and matching_episode_video_exists.
 # - EPISODE_SIDECAREXTENSIONS: space-separated file extensions treated as episode sidecars. Used by is_episode_sidecar_file.
 # - TRICKPLAY_SUFFIX: suffix for Jellyfin trickplay directories. Default is .trickplay. Used by is_episode_sidecar_dir and sidecar_candidate_bases.
 # - THUMB_SUFFIX: suffix used for episode thumbnail files before the extension. Default is -thumb. Used by sidecar_candidate_bases.
-# - SEASON_DIR_GLOB: find -name pattern for season directories under a show folder. Default is Season *.
-# - DELETE_MODE: boolean string true or false. false prints intended actions. true performs filesystem deletion.
-# - CREATE_FORCE_RESCAN: boolean string true or false. true creates FORCE_RESCAN_FILENAME markers in configured library roots and preserved folders.
+# - SEASON_DIR_GLOB: find -name pattern for season directories under a show folder. Default is "Season *".
+# - DRY_RUN_MODE: boolean string true or false. true prevents deletion and writes DRY_RUN_OUTPUT_FILE. false performs filesystem deletion.
+# - DRY_RUN_OUTPUT_FILE: file path that receives would-delete entries when DRY_RUN_MODE=true. Parent directories are created if needed.
+# - CREATE_FORCE_RESCAN: boolean string true or false. true creates FORCE_RESCAN_FILENAME markers in configured library roots and preserved folders. This is independent of DRY_RUN_MODE.
 # - FORCE_RESCAN_FILENAME: marker filename. Default is .forcerescan.
+# - LOG_TO_TERMINAL: boolean string true or false. true writes log lines to stdout.
+# - LOG_TO_FILE: boolean string true or false. true writes log lines to a timestamped file in LOG_DIR.
+# - LOG_DIR: directory where log files are written when LOG_TO_FILE=true.
+# - LOG_MAX_FILES: non-negative integer. If greater than 0 and LOG_TO_FILE=true, retains only the newest LOG_MAX_FILES matching log files and deletes older logs first.
 # Outputs:
-# - Console output: timestamped logs and dry-run/delete actions.
-# - Filesystem side effects only when DELETE_MODE=true: movie folders without videos are deleted, orphan episode sidecars are deleted, empty/no-video season folders are deleted, show folders with no remaining videos are deleted, and optional .forcerescan files are created.
+# - Console output when LOG_TO_TERMINAL=true.
+# - Timestamped log file when LOG_TO_FILE=true. The log file contains a local ISO 8601 generated_at timestamp.
+# - Dry-run deletion list file when DRY_RUN_MODE=true.
+# - Filesystem changes when DRY_RUN_MODE=false: movie folders without videos are deleted, orphan episode sidecars are deleted, empty/no-video season folders are deleted, show folders with no remaining videos are deleted.
+# - Filesystem changes when CREATE_FORCE_RESCAN=true: .forcerescan marker files are created regardless of DRY_RUN_MODE.
 # Functions:
-# - log: writes timestamped status messages.
 # - fail: writes an error and exits non-zero.
 # - load_env: reads and exports key=value config entries.
+# - iso_now: returns local ISO 8601 date and time.
+# - safe_timestamp: returns a filename-safe timestamp.
+# - validate_bool: validates true/false config values.
+# - validate_nonnegative_int: validates non-negative integer config values.
+# - init_logging: initializes terminal/file logging and log retention.
+# - apply_log_retention: deletes oldest log files when LOG_MAX_FILES is greater than 0.
+# - log: writes timestamped status messages to configured destinations.
+# - init_dry_run_output: creates the dry-run deletion-list file when DRY_RUN_MODE=true.
+# - record_dry_run_delete: appends a would-delete item to DRY_RUN_OUTPUT_FILE.
 # - split_paths: converts colon-separated roots into newline-separated paths.
 # - is_video_file: returns success if a file has a configured video extension.
 # - has_recursive_video: returns success if a directory tree contains at least one configured video file.
-# - remove_path: prints or performs file/directory deletion.
-# - touch_force_rescan: prints or creates a rescan marker.
+# - remove_path: records, prints, or performs file/directory deletion depending on DRY_RUN_MODE.
+# - touch_force_rescan: creates a rescan marker when CREATE_FORCE_RESCAN=true, independent of DRY_RUN_MODE.
 # - is_episode_sidecar_dir: returns success for episode-associated trickplay directories.
 # - is_episode_sidecar_file: returns success for episode-associated sidecar files.
 # - sidecar_candidate_bases: prints possible media basenames for a sidecar, including language subtitle handling.
@@ -45,8 +61,9 @@ set -euo pipefail
 IFS=$' \t\n'
 
 ENV_FILE="${ENV_FILE:-./.env}"
+LOG_FILE=""
+DRY_RUN_DELETE_COUNT=0
 
-log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 load_env() {
@@ -66,6 +83,83 @@ load_env() {
     esac
     export "$key=$value"
   done < "$file"
+}
+
+iso_now() {
+  date '+%Y-%m-%dT%H:%M:%S%:z'
+}
+
+safe_timestamp() {
+  date '+%Y%m%dT%H%M%S%z'
+}
+
+validate_bool() {
+  local name="$1"
+  local value="$2"
+  case "$value" in true|false) return 0 ;; *) fail "$name must be true or false" ;; esac
+}
+
+validate_nonnegative_int() {
+  local name="$1"
+  local value="$2"
+  case "$value" in ''|*[!0-9]*) fail "$name must be a non-negative integer" ;; *) return 0 ;; esac
+}
+
+apply_log_retention() {
+  [ "${LOG_TO_FILE}" = "true" ] || return 0
+  [ "${LOG_MAX_FILES}" -gt 0 ] || return 0
+  find "$LOG_DIR" -maxdepth 1 -type f -name 'jellyfin-library-pruner-*.log' -printf '%T@ %p\n' \
+    | sort -nr \
+    | tail -n +$((LOG_MAX_FILES + 1)) \
+    | cut -d' ' -f2- \
+    | while IFS= read -r old_log; do
+        [ -n "$old_log" ] || continue
+        rm -f -- "$old_log"
+      done
+}
+
+init_logging() {
+  if [ "${LOG_TO_FILE}" = "true" ]; then
+    mkdir -p -- "$LOG_DIR"
+    LOG_FILE="$LOG_DIR/jellyfin-library-pruner-$(safe_timestamp).log"
+    {
+      printf 'generated_at=%s\n' "$(iso_now)"
+      printf 'log_file=%s\n' "$LOG_FILE"
+      printf '\n'
+    } > "$LOG_FILE"
+    apply_log_retention
+  fi
+}
+
+log() {
+  local line="[$(iso_now)] $*"
+  if [ "${LOG_TO_TERMINAL}" = "true" ]; then
+    printf '%s\n' "$line"
+  fi
+  if [ "${LOG_TO_FILE}" = "true" ]; then
+    printf '%s\n' "$line" >> "$LOG_FILE"
+  fi
+}
+
+init_dry_run_output() {
+  [ "${DRY_RUN_MODE}" = "true" ] || return 0
+  local output_dir
+  output_dir="$(dirname -- "$DRY_RUN_OUTPUT_FILE")"
+  mkdir -p -- "$output_dir"
+  {
+    printf 'generated_at=%s\n' "$(iso_now)"
+    printf 'dry_run_mode=true\n'
+    printf 'description=Paths that would be deleted if DRY_RUN_MODE=false.\n'
+    printf '\n'
+  } > "$DRY_RUN_OUTPUT_FILE"
+}
+
+record_dry_run_delete() {
+  local target="$1"
+  #local reason="$2"
+  #printf '%s\t%s\n' "$target" "$reason" >> "$DRY_RUN_OUTPUT_FILE"
+  printf '%s\t%s\n' "$target" >> "$DRY_RUN_OUTPUT_FILE"
+  DRY_RUN_DELETE_COUNT=$((DRY_RUN_DELETE_COUNT + 1))
 }
 
 split_paths() {
@@ -98,7 +192,10 @@ has_recursive_video() {
 remove_path() {
   local target="$1"
   local reason="$2"
-  if [ "${DELETE_MODE}" = "true" ]; then
+  if [ "${DRY_RUN_MODE}" = "true" ]; then
+    record_dry_run_delete "$target" "$reason"
+    log "DRY-RUN delete: $target -- $reason"
+  else
     if [ -d "$target" ]; then
       rm -rf -- "$target"
       log "Deleted directory: $target -- $reason"
@@ -106,8 +203,6 @@ remove_path() {
       rm -f -- "$target"
       log "Deleted file: $target -- $reason"
     fi
-  else
-    printf 'DRY-RUN delete: %s -- %s\n' "$target" "$reason"
   fi
 }
 
@@ -116,12 +211,8 @@ touch_force_rescan() {
   [ "${CREATE_FORCE_RESCAN}" = "true" ] || return 0
   [ -d "$dir" ] || return 0
   local marker="$dir/${FORCE_RESCAN_FILENAME}"
-  if [ "${DELETE_MODE}" = "true" ]; then
-    : > "$marker"
-    log "Created marker: $marker"
-  else
-    printf 'DRY-RUN create marker: %s\n' "$marker"
-  fi
+  : > "$marker"
+  log "Created marker: $marker"
 }
 
 is_episode_sidecar_dir() {
@@ -264,20 +355,35 @@ process_show_root() {
 main() {
   load_env "$ENV_FILE"
   : "${MOVIE_PATHS:=}"
-  : "${SHOW_PATHS:=${TV_PATHS:-}}"
+  : "${SHOW_PATHS:=}"
   : "${VIDEO_EXTENSIONS:=mkv mp4 avi mov m4v ts m2ts webm mpg mpeg wmv iso}"
-  : "${EPISODE_SIDECAREXTENSIONS:=srt ass sub idx vtt nfo jpg jpeg png webp}"
+  : "${EPISODE_SIDECAREXTENSIONS:=srt ass sub idx vtt nfo}"
   : "${TRICKPLAY_SUFFIX:=.trickplay}"
   : "${THUMB_SUFFIX:=-thumb}"
   : "${SEASON_DIR_GLOB:=Season *}"
-  : "${DELETE_MODE:=false}"
+  : "${DRY_RUN_MODE:=true}"
+  : "${DRY_RUN_OUTPUT_FILE:=./jellyfin-library-pruner-dry-run.txt}"
   : "${CREATE_FORCE_RESCAN:=false}"
   : "${FORCE_RESCAN_FILENAME:=.forcerescan}"
-  case "$DELETE_MODE" in true|false) ;; *) fail "DELETE_MODE must be true or false" ;; esac
-  case "$CREATE_FORCE_RESCAN" in true|false) ;; *) fail "CREATE_FORCE_RESCAN must be true or false" ;; esac
+  : "${LOG_TO_TERMINAL:=true}"
+  : "${LOG_TO_FILE:=false}"
+  : "${LOG_DIR:=./logs}"
+  : "${LOG_MAX_FILES:=10}"
+  validate_bool DRY_RUN_MODE "$DRY_RUN_MODE"
+  validate_bool CREATE_FORCE_RESCAN "$CREATE_FORCE_RESCAN"
+  validate_bool LOG_TO_TERMINAL "$LOG_TO_TERMINAL"
+  validate_bool LOG_TO_FILE "$LOG_TO_FILE"
+  validate_nonnegative_int LOG_MAX_FILES "$LOG_MAX_FILES"
   [ -n "$MOVIE_PATHS$SHOW_PATHS" ] || fail "Set MOVIE_PATHS and/or SHOW_PATHS in $ENV_FILE"
-  log "DELETE_MODE=$DELETE_MODE"
+  init_logging
+  init_dry_run_output
+  log "DRY_RUN_MODE=$DRY_RUN_MODE"
   log "CREATE_FORCE_RESCAN=$CREATE_FORCE_RESCAN"
+  log "LOG_TO_TERMINAL=$LOG_TO_TERMINAL"
+  log "LOG_TO_FILE=$LOG_TO_FILE"
+  if [ "${DRY_RUN_MODE}" = "true" ]; then
+    log "Dry-run deletion list: $DRY_RUN_OUTPUT_FILE"
+  fi
   if [ -n "$MOVIE_PATHS" ]; then
     split_paths "$MOVIE_PATHS" | while IFS= read -r root; do process_movie_root "$root"; done
   fi

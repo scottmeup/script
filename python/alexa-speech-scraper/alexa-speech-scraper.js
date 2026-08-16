@@ -513,7 +513,7 @@ async function main() {
     cleanUtteranceRecordCount: extraction.records.length,
     recognizedSpeechCount: recognized.recognizedSpeechRecords.length,
     ignoredRecordCount: recognized.ignoredRecords.length,
-    scraper: 'alexa-speech-scraper-playwright-v4.js',
+    scraper: 'alexa-speech-scraper.js',
     promptForMfa: config.promptForMfa,
     checkDontRequireMfa: config.checkDontRequireMfa,
     stripWakeWords: config.stripWakeWords,

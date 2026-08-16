@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 
-set -e
+set -euo pipefail
 debug=0
+
+cleanup() {
+    echo "Stopping child processes..."
+    kill $(jobs -p) 2>/dev/null || true
+    wait
+}
+
+trap cleanup EXIT
 
 required_packages=(
     xvfb
@@ -23,6 +31,8 @@ log_files=(
     /tmp/xvfb.log
     /tmp/x11vnc.log
 )
+
+undeleted_log_files=()
 
 for pkg in "${required_packages[@]}"; do
     if ! dpkg -s "$pkg" >/dev/null 2>&1; then
@@ -48,7 +58,21 @@ clear_log_files(){
     done
 }
 
+confirm_log_files_deleted(){
+    for file in "$log_files"; do
+        if [ -f "$file" ]; then
+            undeleted_log_files+="$file"
+        fi
+    done
+    if [ "${#undeleted_log_files[@]}" -gt 0 ]; then
+        echo "Previous log files could not be removed:"
+        printf '  %s\n' "${undeleted_log_files[@]}"
+    fi
+}
+
 clear_log_files
+
+confirm_log_files_deleted
 
 export DISPLAY=:99
 
@@ -76,6 +100,8 @@ if [ "${#cmd_args[@]}" -eq 0 ]; then
     exit 0
 fi
 
-exec "$@"
+exec "$@" &
 
 clear_log_files
+
+wait

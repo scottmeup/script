@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -e
+debug=0
 
 required_packages=(
     xvfb
@@ -17,6 +18,12 @@ required_packages=(
 
 missing_packages=()
 
+log_files=(
+    /tmp/fluxbox.log
+    /tmp/xvfb.log
+    /tmp/x11vnc.log
+)
+
 for pkg in "${required_packages[@]}"; do
     if ! dpkg -s "$pkg" >/dev/null 2>&1; then
         missing_packages+=("$pkg")
@@ -29,11 +36,19 @@ if [ "${#missing_packages[@]}" -gt 0 ]; then
 
     export DEBIAN_FRONTEND=noninteractive
 
-    apt-get update
-    apt-get install -y "${missing_packages[@]}"
+    sudo apt-get update
+    sudo apt-get install -y "${missing_packages[@]}"
 fi
 
-debug=0
+clear_log_files(){
+    for file in "$log_files"; do
+        if [ -f "$file" ]; then
+            rm "$file"
+        fi
+    done
+}
+
+clear_log_files
 
 export DISPLAY=:99
 
@@ -62,3 +77,5 @@ if [ "${#cmd_args[@]}" -eq 0 ]; then
 fi
 
 exec "$@"
+
+clear_log_files

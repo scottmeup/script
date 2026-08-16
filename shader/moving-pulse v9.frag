@@ -210,11 +210,11 @@ float distance_with_mod(
 float get_offset_of_whole_element(
     float current_location,
     float size_to_offset_by, 
-    float size_of_cycle)
+    float size_of_cycle){
 // Takes current location of element, the amount to offset it by, and the size of the cycle.
 // +ive size_to_offset_by delays the position
 // -ive size_to_offset_by advances the position
-{
+
     float offset_position = mod(current_location-size_to_offset_by, size_of_cycle);
     return offset_position;
 }

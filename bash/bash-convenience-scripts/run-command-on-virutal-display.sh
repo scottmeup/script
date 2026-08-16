@@ -5,11 +5,11 @@ debug=0
 
 cleanup() {
     echo "Stopping child processes..."
-    kill $(jobs -p) 2>/dev/null || true
-    wait
+    trap - EXIT
+    kill -- -$$ 2>/dev/null || true
 }
 
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 required_packages=(
     xvfb

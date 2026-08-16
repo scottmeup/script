@@ -100,7 +100,7 @@ if [ "${#cmd_args[@]}" -eq 0 ]; then
     exit 0
 fi
 
-exec "$@" &
+exec "DISPLAY=:99 $@" &
 
 clear_log_files
 

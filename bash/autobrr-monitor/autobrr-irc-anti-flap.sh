@@ -330,8 +330,11 @@ main() {
   }
 
   container_exists || {
-    log error "event=container_not_found container=$AUTOBRR_CONTAINER"
-    exit 1
+    docker compose -f "$AUTOBRR_COMPOSE_FILE" up --no-start
+    if [ $? -ne 0 ]; then
+      log error "event=container_could_not_build compose-file=$AUTOBRR_COMPOSE_FILE"
+      exit 1
+    fi
   }
 
   load_state

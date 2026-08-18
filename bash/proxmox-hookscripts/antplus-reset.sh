@@ -19,8 +19,8 @@ fi
 ANT_USB_VENDOR="${ANT_USB_VENDOR:-0fcf}"
 ANT_USB_PRODUCT="${ANT_USB_PRODUCT:-1009}"
 ANT_RESET_SETTLE_SECONDS="${ANT_RESET_SETTLE_SECONDS:-3}"
-BLUETOOTH_USB_VENDOR="${ANT_USB_VENDOR:-0fcf}"
-BLUETOOTH_USB_PRODUCT="${ANT_USB_PRODUCT:-1009}"
+BLUETOOTH_USB_VENDOR="${BLUETOOTH_USB_VENDOR:-8087}"
+BLUETOOTH_USB_PRODUCT="${BLUETOOTH_USB_PRODUCT:-0aaa}"
 BLUETOOTH_RESET_SETTLE_SECONDS="${ANT_RESET_SETTLE_SECONDS:-3}"
 ANT_FINISHED=0
 BLUETOOTH_FINISHED=0
@@ -72,6 +72,7 @@ while [ "$LOOP_FINISHED" -eq 0 ]; do
     if [ "$vendor" = "$ANT_USB_VENDOR" ] && [ "$product" = "$ANT_USB_PRODUCT" ] && [ "$ANT_FINISHED" -eq 0 ]; then
       echo "Resetting ANT+ USB device $d for VM $VMID phase $PHASE"
       ANT_FINISHED=1
+      break
     fi
 
     if [ "$vendor" = "$BLUETOOTH_USB_VENDOR" ] && [ "$product" = "$BLUETOOTH_USB_PRODUCT" ] && [ "$BLUETOOTH_FINISHED" -eq 0 ]; then
@@ -89,10 +90,10 @@ done
 
 if [ "$ANT_FINISHED" -eq 0 ]; then 
   echo "ANT+ USB device ${ANT_USB_VENDOR}:${ANT_USB_PRODUCT} not found"
-  EXIT_CODE = 1
+  EXIT_CODE=1
 fi
 if [ "$BLUETOOTH_FINISHED" -eq 0 ]; then 
   echo "Bluetooth USB device ${BLUETOOTH_USB_VENDOR}:${BLUETOOTH_USB_PRODUCT} not found"
-  EXIT_CODE = 1
+  EXIT_CODE=1
 fi
 exit "$EXIT_CODE"

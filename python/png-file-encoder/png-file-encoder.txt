@@ -1,0 +1,85 @@
+PNG file encoder usage
+
+Requirements
+
+Windows 11: Python 3.9 or newer from python.org or Microsoft Store.
+Debian, Ubuntu, Alpine, Red Hat, macOS, and Android Termux: Python 3.9 or newer.
+
+Self-test
+
+Windows:
+python png-file-encoder.py self-test
+
+Linux, macOS, or Termux:
+python3 png-file-encoder.py self-test
+
+Encode one file
+
+Windows:
+python png-file-encoder.py encode C:\testfile.txt
+
+Linux:
+python3 png-file-encoder.py encode /home/myusername/testfile.txt
+
+Encode multiple files and a directory recursively
+
+Windows:
+python png-file-encoder.py encode C:\testfile.txt C:\testdirectory C:\testdirectory\*.txt -r -o artifact-png-output
+
+Linux:
+python3 png-file-encoder.py encode /home/myusername/testfile.txt /home/myusername/testdirectory '/home/myusername/testdirectory/*.txt' -r -o artifact-png-output
+
+Quote glob patterns on Linux when the program, rather than the shell, should resolve them.
+
+Configuration options
+
+--max-png-bytes 4900000
+  Strict exclusive limit for every completed PNG.
+
+--min-aspect 0.80
+  Minimum permitted width divided by height.
+
+--max-aspect 1.25
+  Maximum permitted width divided by height.
+
+--compression-level 9
+  ZIP DEFLATE and PNG zlib level, 0 through 9.
+
+--archive-name collected-artifacts.zip
+  Reconstructed archive filename.
+
+--source DESCRIPTION
+  Non-secret source descriptor embedded in every PNG.
+
+-o --output DIRECTORY
+  Output directory.
+
+-r --recursive 
+  Recursively collect directory contents and recursively resolve PNG directories during decoding.
+
+--overwrite
+  Permit replacement of matching output paths.
+
+Upload procedure
+
+1. Open CHAT-INSTRUCTIONS.txt from the output directory.
+2. Paste that text once at the beginning of the requested upload.
+3. Drag and drop all generated PNG files for that archive set.
+4. Do not upload the source ZIP unless separately requested.
+5. Do not rename, edit, resize, screenshot, or convert the PNG files.
+
+Decode PNG files locally
+
+Windows:
+python png-file-encoder.py decode artifact-png-output\*.png -o decoded --extract
+
+Linux:
+python3 png-file-encoder.py decode 'artifact-png-output/*.png' -o decoded --extract
+
+Inspect transport headers without reconstruction
+
+Windows:
+python png-file-encoder.py inspect artifact-png-output\*.png
+
+Linux:
+python3 png-file-encoder.py inspect 'artifact-png-output/*.png'

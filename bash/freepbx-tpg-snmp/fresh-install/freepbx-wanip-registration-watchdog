@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# install file at:
+# /usr/local/sbin/freepbx-wanip-registration-watchdog
+
+set -euo pipefail
+
+ENV_FILE="${ENV_FILE:-/etc/freepbx-wanip-hosts/freepbx-wanip-hosts.env}"
+
+if [ ! -r "$ENV_FILE" ]; then
+  logger -t freepbx-wanip-watchdog "environment file not readable: $ENV_FILE"
+  exit 10
+fi
+
+. "$ENV_FILE"
+
+TRUNK_NAME="${TRUNK_NAME:?TRUNK_NAME is required}"
+WATCHDOG_RECOVERY_ENABLED="${WATCHDOG_RECOVERY_ENABLED:-yes}"
+
+exec 7>/run/freepbx-wanip-registration-watchdog.lock
+flock -n 7 || exit 0
+
+log_msg() {
+  logger -t freepbx-wanip-watchdog "$1"
+}
+
+is_registered() {
+  asterisk -rx "pjsip show registrations" 2>/dev/null |
+    awk -v trunk="$TRUNK_NAME" '
+      index($0, trunk "/") > 0 && index($0, "Registered") > 0 {
+        found = 1
+      }
+      END {
+        exit found ? 0 : 1
+      }
+    '
+}
+
+if is_registered; then
+  exit 0
+fi
+
+log_msg "$TRUNK_NAME is not Registered"
+
+if [ "$WATCHDOG_RECOVERY_ENABLED" != "yes" ]; then
+  log_msg "watchdog recovery is disabled"
+  exit 1
+fi
+
+log_msg "running registration recovery for $TRUNK_NAME"
+
+/usr/local/sbin/freepbx-wanip-registration-recover
+rc="$?"
+
+case "$rc" in
+  0)
+    log_msg "registration recovery completed successfully"
+    exit 0
+    ;;
+  75)
+    log_msg "registration recovery already running"
+    exit 0
+    ;;
+  *)
+    log_msg "registration recovery failed with exit code $rc"
+    exit "$rc"
+    ;;
+esac

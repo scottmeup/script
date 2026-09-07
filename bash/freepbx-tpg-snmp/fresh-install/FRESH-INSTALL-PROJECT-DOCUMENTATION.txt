@@ -1,0 +1,23 @@
+Project purpose
+
+Install the final accepted TPG support stack directly onto an already configured FreePBX 17 host without replaying the four incremental migration phases.
+
+Input-processing-output flow
+
+freepbx-tpg-fresh-install.env supplies site values. install-freepbx-tpg-fresh.sh validates prerequisites and the existing TPG-VoIP registration, compiles and self-tests components, captures exact current target files and unit states, installs scripts and units, renders operational env files from templates, disables superseded policy units, enables the final stack, creates accepted checksums from the actual rendered installation, and requires the final verifier to report PASS. Runtime scripts produce node state, sticky node selection, filtered event processing, guarded recovery and monitoring. The final verifier produces periodic latest.txt and latest.json integrity reports. rollback-freepbx-tpg-fresh.sh restores captured files and unit states.
+
+File roles
+
+Operational scripts beginning freepbx-tpg or freepbx-wanip implement node state, node policy, event filtering, outbound recovery, registration recovery, router-reboot recovery, WAN-IP hosts maintenance and registration watchdog functions. tpg-sip-error-monitor records low-noise SIP errors. Each script consumes its corresponding rendered env file and produces documented state, logs, host mappings or recovery actions.
+
+Files ending .env.template are direct operational configuration inputs. The installer replaces TPG_HOST, TRUNK_NAME, ROUTER_IP, WAN_IFNAME, HOST_ALIAS, SNMP_COMMUNITY, TASMOTA_POWER_OFF_URL, PCAP_DIR and ROUTER_POWER_CYCLE_ENABLED from freepbx-tpg-fresh-install.env.
+
+Files ending .service and .timer are systemd inputs defining execution order, restart policy and schedules. The installer places them in /etc/systemd/system and enables only the final accepted active set.
+
+freepbx-tpg-update-verify and its env, service and timer implement read-only periodic integrity and runtime verification. The installer dynamically creates /etc/freepbx-wanip-hosts/freepbx-tpg-update-accepted.sha256 after site-specific env rendering.
+
+install-freepbx-tpg-fresh.sh is the installation entrypoint. Inputs are all bundle files, target runtime prerequisites and the site env. Outputs are installed files, generated configs, backups, unit states and PASS report. Side effects are fully rollback-protected.
+
+rollback-freepbx-tpg-fresh.sh is the rollback entrypoint. Input is the newest or explicitly selected backup. Output is the restored pre-install file and unit state. Bundle-created persistent state directories are retained for forensic and later reuse unless they replaced a captured file.
+
+FRESH-INSTALL-INSTRUCTIONS.txt contains ordered prerequisites, installation, verification, test and rollback steps. FRESH-INSTALL-VALIDATION.txt records source evidence and executed or unavailable tests. freepbx-tpg-fresh-install.sha256 verifies every other bundle file.

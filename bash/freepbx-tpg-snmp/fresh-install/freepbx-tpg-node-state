@@ -1,0 +1,527 @@
+#!/usr/bin/env python3
+# Project flow: read the .env configuration, discover current TPG nodes from sip-health.json, collect configured SIP evidence from packet captures and the SIP error log, inspect active TPG calls, merge only new evidence into persistent per-node state, perform an all-unhealthy reset when required, and atomically write JSON and text reports. This file never changes /etc/hosts, Asterisk configuration, registration, node selection, services, or timers.
+# Inputs: ENV_FILE is a path string selecting the .env file. TPG_HOST is the provider hostname. SIP_HEALTH_JSON is a JSON file whose resolved_nodes entry is a list of node IP strings. PCAP_DIR is a directory containing tcpdump-readable .pcap files. SIP_ERROR_LOG is a text file containing timestamp, node, SIP status, CSeq method, and Call-ID fields. TCPDUMP is an executable path. LOOKBACK_SECONDS, PCAP_LOOKBACK_FILES, FAILURE_WINDOW_SECONDS, and thresholds are non-negative integers. HEALTH_EVIDENCE_* entries independently enable evidence that promotes a node. NODE_FAILURE_* entries define evidence that can demote a node. ACTIVE_CALL_PROTECTION_SCOPE is off, trunk, or node; trunk is the conservative default until concurrent per-node call attribution is proven. STATE_FILE and SUMMARY_FILE are output paths.
+# Outputs: STATE_FILE is an atomically replaced JSON object containing schema version, discovery data, reset generation, per-node states, evidence timestamps and reasons, and evaluator metadata. SUMMARY_FILE is an atomically replaced human-readable report. Journal messages use LOG_TAG. --dry-run prints the candidate state without writing. --self-test runs deterministic state-machine tests without accessing the live system.
+# Functions: load_env and config_from_env parse and validate configuration. load_state normalizes absent, null, malformed, old, and unexpected state data. resolved_nodes reads discovery input. parse_error_log and parse_pcaps produce normalized evidence records. active_call_nodes inspects Asterisk and returns global and attributable active-call evidence. evaluate applies chronological evidence, active-call protection, thresholds, promotion, demotion, and all-unhealthy reset rules. atomic_write_json and atomic_write_text persist outputs. self_test exercises boundary cases. main orchestrates one evaluation.
+
+import argparse
+import datetime as dt
+import fcntl
+import glob
+import hashlib
+import ipaddress
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+SCHEMA_VERSION = 1
+VALID_STATES = {'un-errored', 'healthy', 'unhealthy'}
+VALID_SCOPES = {'off', 'trunk', 'node'}
+
+
+def load_env(path):
+    values = {}
+    with open(path, 'r', encoding='utf-8') as handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, value = line.split('=', 1)
+            values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def as_bool(value, key):
+    normalized = str(value).strip().lower()
+    if normalized in {'yes', 'true', '1', 'on'}:
+        return True
+    if normalized in {'no', 'false', '0', 'off'}:
+        return False
+    raise ValueError(f'{key} must be yes or no')
+
+
+def as_int(value, key, minimum=0):
+    try:
+        parsed = int(str(value).strip())
+    except ValueError as exc:
+        raise ValueError(f'{key} must be an integer') from exc
+    if parsed < minimum:
+        raise ValueError(f'{key} must be at least {minimum}')
+    return parsed
+
+
+def as_codes(value, key):
+    codes = set(str(value).split())
+    if any(not re.fullmatch(r'\d{3}', code) for code in codes):
+        raise ValueError(f'{key} must contain space-separated three-digit SIP codes')
+    return codes
+
+
+def config_from_env(values):
+    defaults = {
+        'TPG_HOST': 'uni-v1.tpg.com.au',
+        'TRUNK_NAME': 'TPG-VoIP',
+        'SIP_HEALTH_JSON': '/etc/freepbx-wanip-hosts/tpg-sip-health-state/sip-health.json',
+        'PCAP_DIR': '/var/log/tpg-sip-pcap',
+        'SIP_ERROR_LOG': '/var/log/tpg-sip-node-errors.log',
+        'TCPDUMP': '/usr/bin/tcpdump',
+        'STATE_FILE': '/etc/freepbx-wanip-hosts/tpg-node-state/node-state.json',
+        'SUMMARY_FILE': '/etc/freepbx-wanip-hosts/tpg-node-state/node-state-summary.txt',
+        'LOCK_FILE': '/run/freepbx-tpg-node-state.lock',
+        'LOG_TAG': 'freepbx-tpg-node-state',
+        'LOOKBACK_SECONDS': '86400',
+        'PCAP_LOOKBACK_FILES': '600',
+        'HEALTH_EVIDENCE_INVITE_CODES': '200',
+        'HEALTH_EVIDENCE_ACTIVE_CALL': 'yes',
+        'HEALTH_EVIDENCE_SUCCESSFUL_REGISTRATION': 'no',
+        'REGISTRATION_SUCCESS_CODES': '200',
+        'NODE_FAILURE_INVITE_CODES': '403 408 500 502 503 504',
+        'NODE_FAILURE_REGISTER_CODES': '403 408 500 502 503 504',
+        'NODE_FAILURE_INVITE_MIN_DISTINCT_CALLIDS': '2',
+        'NODE_FAILURE_REGISTER_MIN_DISTINCT_CALLIDS': '1',
+        'FAILURE_WINDOW_SECONDS': '86400',
+        'ACTIVE_CALL_PROTECTION_SCOPE': 'trunk',
+        'RESET_WHEN_ALL_UNHEALTHY': 'yes',
+    }
+    cfg = {**defaults, **values}
+    scope = cfg['ACTIVE_CALL_PROTECTION_SCOPE'].strip().lower()
+    if scope not in VALID_SCOPES:
+        raise ValueError('ACTIVE_CALL_PROTECTION_SCOPE must be off, trunk, or node')
+    return {
+        **cfg,
+        'LOOKBACK_SECONDS_INT': as_int(cfg['LOOKBACK_SECONDS'], 'LOOKBACK_SECONDS', 1),
+        'PCAP_LOOKBACK_FILES_INT': as_int(cfg['PCAP_LOOKBACK_FILES'], 'PCAP_LOOKBACK_FILES', 1),
+        'HEALTH_INVITE_CODES': as_codes(cfg['HEALTH_EVIDENCE_INVITE_CODES'], 'HEALTH_EVIDENCE_INVITE_CODES'),
+        'HEALTH_ACTIVE_CALL': as_bool(cfg['HEALTH_EVIDENCE_ACTIVE_CALL'], 'HEALTH_EVIDENCE_ACTIVE_CALL'),
+        'HEALTH_REGISTRATION': as_bool(cfg['HEALTH_EVIDENCE_SUCCESSFUL_REGISTRATION'], 'HEALTH_EVIDENCE_SUCCESSFUL_REGISTRATION'),
+        'REGISTRATION_SUCCESS_CODE_SET': as_codes(cfg['REGISTRATION_SUCCESS_CODES'], 'REGISTRATION_SUCCESS_CODES'),
+        'FAILURE_INVITE_CODES': as_codes(cfg['NODE_FAILURE_INVITE_CODES'], 'NODE_FAILURE_INVITE_CODES'),
+        'FAILURE_REGISTER_CODES': as_codes(cfg['NODE_FAILURE_REGISTER_CODES'], 'NODE_FAILURE_REGISTER_CODES'),
+        'FAILURE_INVITE_THRESHOLD': as_int(cfg['NODE_FAILURE_INVITE_MIN_DISTINCT_CALLIDS'], 'NODE_FAILURE_INVITE_MIN_DISTINCT_CALLIDS', 1),
+        'FAILURE_REGISTER_THRESHOLD': as_int(cfg['NODE_FAILURE_REGISTER_MIN_DISTINCT_CALLIDS'], 'NODE_FAILURE_REGISTER_MIN_DISTINCT_CALLIDS', 1),
+        'FAILURE_WINDOW_SECONDS_INT': as_int(cfg['FAILURE_WINDOW_SECONDS'], 'FAILURE_WINDOW_SECONDS', 1),
+        'ACTIVE_CALL_SCOPE': scope,
+        'RESET_ALL': as_bool(cfg['RESET_WHEN_ALL_UNHEALTHY'], 'RESET_WHEN_ALL_UNHEALTHY'),
+    }
+
+
+def log(cfg, message):
+    subprocess.run(['logger', '-t', cfg['LOG_TAG'], message], check=False)
+
+
+def run(args):
+    return subprocess.run(args, capture_output=True, text=True, errors='ignore')
+
+
+def valid_node(value):
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
+def new_node(now):
+    return {
+        'state': 'un-errored',
+        'state_since_epoch': now,
+        'reason': 'discovered',
+        'last_evidence_epoch': 0,
+        'last_healthy_epoch': 0,
+        'last_unhealthy_epoch': 0,
+        'last_code': '',
+        'last_method': '',
+        'last_callid': '',
+        'active_call_protected': False,
+    }
+
+
+def normalize_node(value, now):
+    result = new_node(now)
+    if not isinstance(value, dict):
+        return result
+    state = value.get('state')
+    if state in VALID_STATES:
+        result['state'] = state
+    for key in ('state_since_epoch', 'last_evidence_epoch', 'last_healthy_epoch', 'last_unhealthy_epoch'):
+        raw = value.get(key)
+        result[key] = int(raw) if isinstance(raw, (int, float)) and raw >= 0 else result[key]
+    for key in ('reason', 'last_code', 'last_method', 'last_callid'):
+        raw = value.get(key)
+        result[key] = str(raw) if raw is not None else ''
+    result['active_call_protected'] = bool(value.get('active_call_protected', False))
+    return result
+
+
+def load_state(path, now):
+    try:
+        raw = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    raw_nodes = raw.get('nodes') if isinstance(raw.get('nodes'), dict) else {}
+    nodes = {str(node): normalize_node(value, now) for node, value in raw_nodes.items() if valid_node(str(node))}
+    return {
+        'schema_version': SCHEMA_VERSION,
+        'generation': int(raw.get('generation', 0)) if isinstance(raw.get('generation'), (int, float)) else 0,
+        'last_reset_epoch': int(raw.get('last_reset_epoch', 0)) if isinstance(raw.get('last_reset_epoch'), (int, float)) else 0,
+        'last_evaluated_epoch': int(raw.get('last_evaluated_epoch', 0)) if isinstance(raw.get('last_evaluated_epoch'), (int, float)) else 0,
+        'nodes': nodes,
+    }
+
+
+def resolved_nodes(cfg):
+    try:
+        data = json.loads(Path(cfg['SIP_HEALTH_JSON']).read_text(encoding='utf-8'))
+    except Exception as exc:
+        raise RuntimeError(f'cannot read SIP health JSON: {exc}') from exc
+    values = data.get('resolved_nodes')
+    if not isinstance(values, list):
+        raise RuntimeError('SIP health JSON resolved_nodes must be a list')
+    nodes = sorted({str(value) for value in values if valid_node(str(value))})
+    if not nodes:
+        raise RuntimeError('SIP health JSON contains no valid resolved nodes')
+    return nodes
+
+
+def parse_iso_timestamp(date_text, zone_text):
+    try:
+        return dt.datetime.strptime(date_text + zone_text, '%Y-%m-%dT%H:%M:%S%z').timestamp()
+    except ValueError:
+        return 0
+
+
+def event_id(event):
+    parts = [str(event.get(key, '')) for key in ('ts', 'node', 'method', 'code', 'callid', 'source')]
+    return hashlib.sha256('\0'.join(parts).encode('utf-8')).hexdigest()
+
+
+def parse_error_log(cfg, nodes, cutoff):
+    path = Path(cfg['SIP_ERROR_LOG'])
+    if not path.exists():
+        return []
+    pattern = re.compile(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})([+-]\d{4}).*?node=([0-9.]+).*?status="SIP/2\.0\s+(\d{3})\s+([^"]+)".*?cseq="\d+\s+([A-Z]+)".*?callid="([^"]+)"', re.I)
+    events = []
+    for raw in path.read_text(encoding='utf-8', errors='ignore').splitlines():
+        match = pattern.match(raw.strip())
+        if not match or match.group(3) not in nodes:
+            continue
+        timestamp = parse_iso_timestamp(match.group(1), match.group(2))
+        if timestamp < cutoff:
+            continue
+        event = {'ts': timestamp, 'node': match.group(3), 'code': match.group(4), 'reason': match.group(5), 'method': match.group(6).upper(), 'callid': match.group(7), 'source': 'error_log'}
+        event['id'] = event_id(event)
+        events.append(event)
+    return events
+
+
+def clean_ip(endpoint):
+    value = endpoint.strip()
+    return value.rsplit('.', 1)[0] if value.count('.') >= 4 else value
+
+
+def pcap_timestamp(date_text, time_text, fallback):
+    for fmt in ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S'):
+        try:
+            parsed = dt.datetime.strptime(f'{date_text} {time_text}', fmt)
+            return parsed.replace(tzinfo=dt.datetime.now().astimezone().tzinfo).timestamp()
+        except ValueError:
+            pass
+    return fallback
+
+
+def parse_pcaps(cfg, nodes, cutoff):
+    paths = []
+    for value in glob.glob(os.path.join(cfg['PCAP_DIR'], '*.pcap')):
+        try:
+            if os.path.getmtime(value) >= cutoff - 30:
+                paths.append(value)
+        except OSError:
+            pass
+    paths.sort(key=os.path.getmtime, reverse=True)
+    paths = paths[:cfg['PCAP_LOOKBACK_FILES_INT']]
+    packet_re = re.compile(r'^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(?:(?:\S+)\s+)?(?:(?:In|Out)\s+)?IP\s+([^\s]+)\.5060\s+>\s+([^\s]+)\.5060:\s+SIP(?::\s*(.*))?$', re.I)
+    status_re = re.compile(r'SIP/2\.0\s+(\d{3})\s+([^\r\n]+)')
+    cseq_re = re.compile(r'^CSeq:\s*\d+\s+([A-Z]+)', re.I)
+    callid_re = re.compile(r'^(?:Call-ID|i):\s*(\S+)', re.I)
+    events = []
+    seen = set()
+    for path in paths:
+        proc = run([cfg['TCPDUMP'], '-nn', '-tttt', '-r', path, '-A', 'udp port 5060'])
+        if proc.returncode not in (0, 1):
+            continue
+        current = None
+        for line in proc.stdout.splitlines():
+            match = packet_re.match(line)
+            if match:
+                if current:
+                    finalize_pcap_event(current, nodes, cutoff, events, seen)
+                source = clean_ip(match.group(3))
+                summary = match.group(5) or ''
+                status = status_re.search(summary)
+                current = {'ts': pcap_timestamp(match.group(1), match.group(2), os.path.getmtime(path)), 'node': source, 'code': status.group(1) if status else '', 'reason': status.group(2).strip() if status else '', 'method': '', 'callid': '', 'source': 'pcap'}
+                continue
+            if not current:
+                continue
+            status = status_re.search(line)
+            if status:
+                current['code'] = status.group(1)
+                current['reason'] = status.group(2).strip()
+            cseq = cseq_re.match(line)
+            if cseq:
+                current['method'] = cseq.group(1).upper()
+            callid = callid_re.match(line)
+            if callid:
+                current['callid'] = callid.group(1)
+            if line == '':
+                finalize_pcap_event(current, nodes, cutoff, events, seen)
+                current = None
+        if current:
+            finalize_pcap_event(current, nodes, cutoff, events, seen)
+    return events
+
+
+def finalize_pcap_event(event, nodes, cutoff, output, seen):
+    if event.get('node') not in nodes or event.get('ts', 0) < cutoff or not event.get('code') or not event.get('method'):
+        return
+    event['id'] = event_id(event)
+    if event['id'] not in seen:
+        seen.add(event['id'])
+        output.append(dict(event))
+
+
+def active_call_nodes(cfg, nodes):
+    result = run(['asterisk', '-rx', 'core show channels concise'])
+    global_active = f"PJSIP/{cfg['TRUNK_NAME']}-" in result.stdout
+    attributable = set()
+    if global_active:
+        stats = run(['asterisk', '-rx', 'pjsip show channelstats'])
+        for node in nodes:
+            if node in stats.stdout:
+                attributable.add(node)
+    return {'global_active': global_active, 'nodes': attributable, 'attribution_available': bool(attributable)}
+
+
+def protected(cfg, active, node):
+    if cfg['ACTIVE_CALL_SCOPE'] == 'off':
+        return False
+    if cfg['ACTIVE_CALL_SCOPE'] == 'trunk':
+        return active['global_active']
+    return node in active['nodes']
+
+
+def transition(entry, state, reason, event, now):
+    entry['state'] = state
+    entry['state_since_epoch'] = int(event.get('ts', now))
+    entry['reason'] = reason
+    entry['last_evidence_epoch'] = int(event.get('ts', now))
+    entry['last_code'] = event.get('code', '')
+    entry['last_method'] = event.get('method', '')
+    entry['last_callid'] = event.get('callid', '')
+    if state == 'healthy':
+        entry['last_healthy_epoch'] = int(event.get('ts', now))
+    elif state == 'unhealthy':
+        entry['last_unhealthy_epoch'] = int(event.get('ts', now))
+
+
+def evaluate(cfg, state, discovered, events, active, now):
+    state['nodes'] = {node: state['nodes'].get(node, new_node(now)) for node in discovered}
+    for node in discovered:
+        state['nodes'][node]['active_call_protected'] = protected(cfg, active, node)
+    evaluation_floor = max(now - cfg['LOOKBACK_SECONDS_INT'], state.get('last_reset_epoch', 0))
+    relevant = [event for event in events if event['node'] in state['nodes'] and event['ts'] >= evaluation_floor and (state.get('last_reset_epoch', 0) == 0 or event['ts'] > state['last_reset_epoch'])]
+    relevant.sort(key=lambda item: (item['ts'], item['id']))
+    failure_sets = {node: {'INVITE': {}, 'REGISTER': {}} for node in discovered}
+    for event in relevant:
+        node = event['node']
+        method = event['method']
+        code = event['code']
+        entry = state['nodes'][node]
+        entry['active_call_protected'] = protected(cfg, active, node)
+        if method == 'INVITE' and code in cfg['HEALTH_INVITE_CODES']:
+            transition(entry, 'healthy', f'invite_{code}', event, now)
+            failure_sets[node]['INVITE'].clear()
+            continue
+        if method == 'REGISTER' and cfg['HEALTH_REGISTRATION'] and code in cfg['REGISTRATION_SUCCESS_CODE_SET']:
+            transition(entry, 'healthy', f'register_{code}', event, now)
+            failure_sets[node]['REGISTER'].clear()
+            continue
+        failure_codes = cfg['FAILURE_INVITE_CODES'] if method == 'INVITE' else cfg['FAILURE_REGISTER_CODES'] if method == 'REGISTER' else set()
+        if code not in failure_codes:
+            continue
+        calls = failure_sets[node][method]
+        calls[event.get('callid') or event['id']] = event
+        window_start = event['ts'] - cfg['FAILURE_WINDOW_SECONDS_INT']
+        calls = {key: value for key, value in calls.items() if value['ts'] >= window_start}
+        failure_sets[node][method] = calls
+        threshold = cfg['FAILURE_INVITE_THRESHOLD'] if method == 'INVITE' else cfg['FAILURE_REGISTER_THRESHOLD']
+        if len(calls) >= threshold and not protected(cfg, active, node):
+            transition(entry, 'unhealthy', f'{method.lower()}_{code}_threshold_{threshold}', event, now)
+        elif len(calls) >= threshold:
+            entry['active_call_protected'] = True
+            entry['reason'] = f'{method.lower()}_{code}_protected_by_active_call'
+            entry['last_evidence_epoch'] = int(event['ts'])
+            entry['last_code'] = code
+            entry['last_method'] = method
+            entry['last_callid'] = event.get('callid', '')
+    if cfg['HEALTH_ACTIVE_CALL']:
+        for node in active['nodes']:
+            if node in state['nodes']:
+                event = {'ts': now, 'code': '', 'method': 'ACTIVE_CALL', 'callid': ''}
+                transition(state['nodes'][node], 'healthy', 'active_call', event, now)
+                state['nodes'][node]['active_call_protected'] = True
+    reset = False
+    if cfg['RESET_ALL'] and discovered and all(state['nodes'][node]['state'] == 'unhealthy' for node in discovered):
+        reset = True
+        state['generation'] = state.get('generation', 0) + 1
+        state['last_reset_epoch'] = now
+        for node in discovered:
+            state['nodes'][node] = new_node(now)
+            state['nodes'][node]['reason'] = 'all_unhealthy_reset'
+    state['schema_version'] = SCHEMA_VERSION
+    state['generated_at'] = dt.datetime.fromtimestamp(now, dt.timezone.utc).isoformat()
+    state['last_evaluated_epoch'] = now
+    state['resolved_nodes'] = discovered
+    state['active_call'] = {
+        'global_active': bool(active.get('global_active', False)),
+        'nodes': sorted(active.get('nodes', set())),
+        'attribution_available': bool(active.get('attribution_available', False)),
+    }
+    state['evaluation'] = {'evidence_records': len(relevant), 'all_unhealthy_reset': reset, 'active_call_protection_scope': cfg['ACTIVE_CALL_SCOPE']}
+    return state
+
+
+def atomic_write_text(path, text, mode=0o640):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + '.', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def atomic_write_json(path, value):
+    atomic_write_text(path, json.dumps(value, indent=2, sort_keys=True) + '\n')
+
+
+def summary(state):
+    lines = [
+        f"generated_at={state['generated_at']}",
+        f"generation={state['generation']}",
+        f"active_call_global={str(state['active_call']['global_active']).lower()}",
+        f"active_call_nodes={' '.join(sorted(state['active_call']['nodes']))}",
+        f"active_call_attribution_available={str(state['active_call']['attribution_available']).lower()}",
+        f"all_unhealthy_reset={str(state['evaluation']['all_unhealthy_reset']).lower()}",
+    ]
+    for node in state['resolved_nodes']:
+        entry = state['nodes'][node]
+        lines.append(f"{node} {entry['state']} reason={entry['reason']} code={entry['last_code']} method={entry['last_method']} callid={entry['last_callid']} protected={str(entry['active_call_protected']).lower()} since={entry['state_since_epoch']}")
+    return '\n'.join(lines) + '\n'
+
+
+def test_cfg():
+    return config_from_env({'HEALTH_EVIDENCE_INVITE_CODES': '200', 'NODE_FAILURE_INVITE_CODES': '403 503', 'NODE_FAILURE_REGISTER_CODES': '503', 'NODE_FAILURE_INVITE_MIN_DISTINCT_CALLIDS': '2', 'NODE_FAILURE_REGISTER_MIN_DISTINCT_CALLIDS': '1', 'ACTIVE_CALL_PROTECTION_SCOPE': 'trunk'})
+
+
+def make_event(ts, node, method, code, callid):
+    value = {'ts': ts, 'node': node, 'method': method, 'code': code, 'callid': callid, 'reason': '', 'source': 'test'}
+    value['id'] = event_id(value)
+    return value
+
+
+def self_test():
+    cfg = test_cfg()
+    now = 200000
+    nodes = ['172.26.0.33', '172.26.0.81']
+    inactive = {'global_active': False, 'nodes': set(), 'attribution_available': False}
+    active = {'global_active': True, 'nodes': set(), 'attribution_available': False}
+    state = load_state(Path('/nonexistent'), now)
+    result = evaluate(cfg, state, nodes, [], inactive, now)
+    assert all(result['nodes'][node]['state'] == 'un-errored' for node in nodes)
+    result = evaluate(cfg, result, nodes, [make_event(now + 1, nodes[0], 'REGISTER', '200', 'r1')], inactive, now + 1)
+    assert result['nodes'][nodes[0]]['state'] == 'un-errored'
+    events = [make_event(now + 2, nodes[0], 'INVITE', '403', 'a'), make_event(now + 3, nodes[0], 'INVITE', '403', 'b')]
+    result = evaluate(cfg, result, nodes, events, active, now + 3)
+    assert result['nodes'][nodes[0]]['state'] == 'un-errored'
+    result = evaluate(cfg, result, nodes, events, inactive, now + 4)
+    assert result['nodes'][nodes[0]]['state'] == 'unhealthy'
+    result = evaluate(cfg, result, nodes, [make_event(now + 5, nodes[0], 'INVITE', '200', 'c')], inactive, now + 5)
+    assert result['nodes'][nodes[0]]['state'] == 'healthy'
+    all_bad = [make_event(now + 6, nodes[0], 'REGISTER', '503', 'd'), make_event(now + 6, nodes[1], 'REGISTER', '503', 'e')]
+    result = evaluate(cfg, result, nodes, all_bad, inactive, now + 6)
+    assert result['evaluation']['all_unhealthy_reset'] is True
+    assert all(result['nodes'][node]['state'] == 'un-errored' for node in nodes)
+    generation = result['generation']
+    result = evaluate(cfg, result, nodes, all_bad, inactive, now + 7)
+    assert all(result['nodes'][node]['state'] == 'un-errored' for node in nodes)
+    assert result['generation'] == generation
+    assert result['evaluation']['all_unhealthy_reset'] is False
+    malformed = load_state(Path('/nonexistent'), now)
+    assert malformed['nodes'] == {}
+    print('self-test passed')
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--self-test', action='store_true')
+    args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        return 0
+    env_file = os.environ.get('ENV_FILE', '/etc/freepbx-wanip-hosts/freepbx-tpg-node-state.env')
+    if not os.path.exists(env_file):
+        print(f'ENV file not readable: {env_file}', file=sys.stderr)
+        return 10
+    try:
+        cfg = config_from_env(load_env(env_file))
+        lock_fd = os.open(cfg['LOCK_FILE'], os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        now = int(time.time())
+        state_path = Path(cfg['STATE_FILE'])
+        state = load_state(state_path, now)
+        discovered = resolved_nodes(cfg)
+        cutoff = now - cfg['LOOKBACK_SECONDS_INT']
+        events_by_id = {}
+        for event in parse_error_log(cfg, set(discovered), cutoff) + parse_pcaps(cfg, set(discovered), cutoff):
+            events_by_id[event['id']] = event
+        active = active_call_nodes(cfg, discovered)
+        result = evaluate(cfg, state, discovered, list(events_by_id.values()), active, now)
+        if args.dry_run:
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0
+        atomic_write_json(state_path, result)
+        atomic_write_text(Path(cfg['SUMMARY_FILE']), summary(result))
+        log(cfg, f"evaluated {len(discovered)} nodes evidence={result['evaluation']['evidence_records']} reset={result['evaluation']['all_unhealthy_reset']}")
+        print(summary(result), end='')
+        return 0
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        try:
+            cfg
+        except UnboundLocalError:
+            return 11
+        log(cfg, f'evaluation failed: {exc}')
+        return 12
+
+
+if __name__ == '__main__':
+    sys.exit(main())

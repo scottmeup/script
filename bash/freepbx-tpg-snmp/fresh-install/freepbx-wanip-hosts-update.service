@@ -1,0 +1,6 @@
+[Unit]
+Description=Update /etc/hosts public IP alias for FreePBX SIP NAT
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/freepbx-wanip-hosts-update

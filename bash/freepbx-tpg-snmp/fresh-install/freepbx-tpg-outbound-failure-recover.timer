@@ -1,0 +1,14 @@
+# install file to
+# /etc/systemd/system/freepbx-tpg-outbound-failure-recover.timer
+
+[Unit]
+Description=Run TPG outbound failure recovery fallback periodically
+
+[Timer]
+OnBootSec=120
+OnUnitActiveSec=60
+AccuracySec=10
+Unit=freepbx-tpg-outbound-failure-recover.service
+
+[Install]
+WantedBy=timers.target

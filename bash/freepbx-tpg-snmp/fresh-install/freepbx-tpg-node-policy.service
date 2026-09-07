@@ -1,0 +1,14 @@
+# Inputs: persistent node-state JSON, policy environment and /etc/hosts. Outputs: one sticky managed node, policy state, hosts backup and journal entries. Changes are deferred during active trunk calls.
+[Unit]
+Description=Apply sticky single-node TPG SIP policy
+After=network-online.target asterisk.service freepbx-tpg-node-state.service
+Wants=network-online.target
+Requires=freepbx-tpg-node-state.service
+
+[Service]
+Type=oneshot
+Environment=ENV_FILE=/etc/freepbx-wanip-hosts/freepbx-tpg-node-policy.env
+ExecStart=/usr/local/sbin/freepbx-tpg-node-policy
+User=root
+Group=root
+UMask=0027

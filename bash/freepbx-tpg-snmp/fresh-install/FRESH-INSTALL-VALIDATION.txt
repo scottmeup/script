@@ -1,0 +1,20 @@
+Fresh-install bundle validation
+
+Source baseline:
+- Validated Deliverable 4 baseline archive SHA-256 4e2a5401890c97a31c81aa65e802d9bf9cee58eff2007937217462b0794e6987.
+- 79 exact baseline artifacts, zero missing or inaccessible.
+- Runtime scripts, templates and units were copied directly from that baseline. The final verifier was copied from the accepted Deliverable 4 artifacts.
+
+Executed tests:
+- Python native compilation: node state, node policy, corrected event watcher, outbound recovery and final verifier passed.
+- Available component self-tests for node state, node policy, corrected event watcher and verifier: passed. Outbound recovery has no self-test entrypoint and received Python native compilation validation.
+- Installer Bash native syntax: passed.
+- Rollback Bash native syntax: passed.
+- All supplied systemd units: systemd-analyze verification passed using relocated executable fixtures.
+- Required-input rejection, missing-command checks, trunk-existence check, pre-change backup, automatic failure restoration, dynamic accepted hashing and PASS-report gate are implemented.
+- Final files were copied separately and checksummed after validation.
+
+Not executed:
+- The fresh install was not executed on a separate clean FreePBX host because no such runtime is connected.
+- Router SNMP, Tasmota power control, live registration recovery and outbound call behavior were not exercised on a clean host.
+- Do not call this fresh bundle live-validated until installation and call testing complete on its target.

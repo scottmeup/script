@@ -1,0 +1,19 @@
+# Inputs: completed PCAP events and /etc/freepbx-wanip-hosts/freepbx-tpg-node-event-watch.env. Outputs: ordered state, policy and recovery execution plus persistent watcher state and journal records.
+[Unit]
+Description=Run event-driven TPG node state, sticky policy and recovery pipeline
+After=network-online.target asterisk.service tpg-sip-pcap.service freepbx-tpg-node-state.service freepbx-tpg-node-policy.service
+Wants=network-online.target tpg-sip-pcap.service
+Requires=tpg-sip-pcap.service
+
+[Service]
+Type=simple
+Environment=ENV_FILE=/etc/freepbx-wanip-hosts/freepbx-tpg-node-event-watch.env
+ExecStart=/usr/local/sbin/freepbx-tpg-node-event-watch
+User=root
+Group=root
+UMask=0027
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

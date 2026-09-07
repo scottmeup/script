@@ -1,0 +1,12 @@
+# Runs the non-disruptive persistent node-state evaluator every 60 seconds.
+[Unit]
+Description=Run persistent TPG SIP node-state evaluation
+
+[Timer]
+OnBootSec=180
+OnUnitActiveSec=60
+AccuracySec=10
+Unit=freepbx-tpg-node-state.service
+
+[Install]
+WantedBy=timers.target

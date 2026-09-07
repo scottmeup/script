@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+# Project flow: load immutable accepted-file checksums and runtime expectations, verify exact installed Deliverables 1 through 3 plus existing outbound recovery, validate persistent JSON state, ensure exactly one active managed hostname entry, compare resolver output to the sticky selected node, verify required and prohibited systemd states, query Asterisk registration, and atomically write a plain-text and JSON report. This verifier is read-only except for its own report files and never changes routing, registration, PJSIP, host mappings, services, timers, or persistent operational state.
+# Inputs: ENV_FILE selects the .env file. CHECKSUM_FILE contains SHA-256 and absolute path pairs. REPORT_TEXT and REPORT_JSON are output paths. TPG_HOST is the managed hostname. NODE_STATE_FILE, POLICY_STATE_FILE, and EVENT_STATE_FILE are JSON inputs. REQUIRED_ACTIVE_UNITS and REQUIRED_ENABLED_UNITS are space-separated systemd units. REQUIRED_INACTIVE_UNITS are units that must not be active. ASTERISK_REGISTRATION_NAME identifies the registration query. ROOT_PREFIX optionally redirects absolute file checks into a fixture root. COMMAND_PREFIX optionally prepends a fixture command directory. --self-test exercises valid and invalid checksum, JSON, hosts, resolver, unit, and registration boundaries.
+# Outputs: REPORT_TEXT contains timestamped PASS, WARN, and FAIL records. REPORT_JSON contains schema version, timestamp, overall status, counts, selected node, and all checks. Exit 0 means every required check passed; exit 1 means one or more required checks failed; exit 2 means configuration or execution could not be evaluated safely.
+# Functions: load_env parses configuration. parse_checksum_file validates checksum records. sha256_file hashes files. run_command runs bounded commands. add records a check. read_json validates JSON object inputs. verify performs all checks. atomic_write writes reports. self_test runs generated fixtures. main selects self-test or live verification.
+
+import argparse
+import datetime as dt
+import hashlib
+import json
+import os
+import shlex
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+def load_env(path):
+    values = {}
+    with open(path, 'r', encoding='utf-8') as handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, value = line.split('=', 1)
+            values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def config(values):
+    defaults = {
+        'CHECKSUM_FILE': '/etc/freepbx-wanip-hosts/freepbx-tpg-update-accepted.sha256',
+        'REPORT_TEXT': '/etc/freepbx-wanip-hosts/tpg-update-verification/latest.txt',
+        'REPORT_JSON': '/etc/freepbx-wanip-hosts/tpg-update-verification/latest.json',
+        'TPG_HOST': 'uni-v1.tpg.com.au',
+        'HOSTS_FILE': '/etc/hosts',
+        'NODE_STATE_FILE': '/etc/freepbx-wanip-hosts/tpg-node-state/node-state.json',
+        'POLICY_STATE_FILE': '/etc/freepbx-wanip-hosts/tpg-node-policy/policy-state.json',
+        'EVENT_STATE_FILE': '/etc/freepbx-wanip-hosts/tpg-node-event-watch/state.json',
+        'REQUIRED_ACTIVE_UNITS': 'freepbx-tpg-node-state.timer freepbx-tpg-node-policy.timer freepbx-tpg-node-event-watch.service freepbx-tpg-outbound-failure-recover.timer tpg-sip-error-monitor.service tpg-sip-pcap.service',
+        'REQUIRED_ENABLED_UNITS': 'freepbx-tpg-node-state.timer freepbx-tpg-node-policy.timer freepbx-tpg-node-event-watch.service freepbx-tpg-outbound-failure-recover.timer tpg-sip-error-monitor.service tpg-sip-pcap.service',
+        'REQUIRED_INACTIVE_UNITS': 'freepbx-tpg-sip-health-policy.timer freepbx-tpg-sip-health-policy-watch.service',
+        'ASTERISK_REGISTRATION_NAME': 'TPG-VoIP',
+        'COMMAND_TIMEOUT_SECONDS': '20',
+        'ROOT_PREFIX': '',
+        'COMMAND_PREFIX': '',
+    }
+    result = {**defaults, **values}
+    try:
+        result['TIMEOUT'] = int(result['COMMAND_TIMEOUT_SECONDS'])
+    except ValueError as exc:
+        raise ValueError('COMMAND_TIMEOUT_SECONDS must be an integer') from exc
+    if result['TIMEOUT'] < 1:
+        raise ValueError('COMMAND_TIMEOUT_SECONDS must be at least 1')
+    for key in ('REQUIRED_ACTIVE_UNITS', 'REQUIRED_ENABLED_UNITS', 'REQUIRED_INACTIVE_UNITS'):
+        result[key + '_LIST'] = shlex.split(result[key])
+    return result
+
+
+def rooted(cfg, path):
+    value = Path(path)
+    if cfg['ROOT_PREFIX']:
+        return Path(cfg['ROOT_PREFIX']) / str(value).lstrip('/')
+    return value
+
+
+def parse_checksum_file(path):
+    records = []
+    for number, raw in enumerate(path.read_text(encoding='utf-8').splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2 or len(parts[0]) != 64 or any(c not in '0123456789abcdefABCDEF' for c in parts[0]):
+            raise ValueError(f'invalid checksum record at line {number}')
+        target = parts[1].lstrip('*')
+        if not target.startswith('/'):
+            raise ValueError(f'checksum target must be absolute at line {number}')
+        records.append((parts[0].lower(), target))
+    if not records:
+        raise ValueError('checksum file contains no records')
+    return records
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with path.open('rb') as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def command(cfg, argv):
+    prefix = shlex.split(cfg['COMMAND_PREFIX']) if cfg['COMMAND_PREFIX'] else []
+    try:
+        result = subprocess.run(prefix + argv, capture_output=True, text=True, errors='replace', timeout=cfg['TIMEOUT'])
+        return result.returncode, result.stdout, result.stderr
+    except subprocess.TimeoutExpired as exc:
+        return 124, exc.stdout or '', exc.stderr or ''
+
+
+def read_json(path):
+    value = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(value, dict):
+        raise ValueError('JSON root is not an object')
+    return value
+
+
+def atomic_write(path, content):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + '.', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o640)
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def verify(cfg):
+    checks = []
+    selected_node = ''
+    def add(name, status, detail):
+        checks.append({'name': name, 'status': status, 'detail': str(detail)})
+    checksum_path = rooted(cfg, cfg['CHECKSUM_FILE'])
+    try:
+        records = parse_checksum_file(checksum_path)
+        add('checksum_manifest', 'PASS', f'{len(records)} accepted files')
+    except Exception as exc:
+        add('checksum_manifest', 'FAIL', exc)
+        records = []
+    for expected, target in records:
+        path = rooted(cfg, target)
+        if not path.is_file():
+            add(f'file:{target}', 'FAIL', 'missing or not a regular file')
+            continue
+        actual = sha256_file(path)
+        add(f'file:{target}', 'PASS' if actual == expected else 'FAIL', f'expected={expected} actual={actual}')
+    json_specs = (
+        ('node_state', cfg['NODE_STATE_FILE']),
+        ('policy_state', cfg['POLICY_STATE_FILE']),
+        ('event_state', cfg['EVENT_STATE_FILE']),
+    )
+    values = {}
+    for name, target in json_specs:
+        try:
+            values[name] = read_json(rooted(cfg, target))
+            add(name, 'PASS', f'valid JSON object at {target}')
+        except Exception as exc:
+            add(name, 'FAIL', exc)
+    policy = values.get('policy_state', {})
+    selected = policy.get('selected_node')
+    if isinstance(selected, str) and selected:
+        selected_node = selected
+        add('selected_node', 'PASS', selected)
+    else:
+        add('selected_node', 'FAIL', 'missing or empty selected_node')
+    nodes = values.get('node_state', {}).get('nodes')
+    if selected_node and isinstance(nodes, dict) and isinstance(nodes.get(selected_node), dict):
+        state = nodes[selected_node].get('state')
+        add('selected_node_state', 'PASS' if state == 'healthy' else 'FAIL', f'{selected_node} state={state}')
+    else:
+        add('selected_node_state', 'FAIL', 'selected node absent from node state')
+    event = values.get('event_state', {})
+    schema = event.get('schema_version')
+    add('event_schema', 'PASS' if schema == 2 else 'FAIL', f'schema_version={schema}')
+    hosts_path = rooted(cfg, cfg['HOSTS_FILE'])
+    active = []
+    try:
+        for raw in hosts_path.read_text(encoding='utf-8').splitlines():
+            line = raw.strip()
+            if line and not line.startswith('#'):
+                parts = line.split()
+                if len(parts) >= 2 and cfg['TPG_HOST'] in parts[1:]:
+                    active.append(parts[0])
+        expected = [selected_node] if selected_node else []
+        add('hosts_single_selected_node', 'PASS' if active == expected else 'FAIL', f'active={active} selected={selected_node}')
+    except Exception as exc:
+        add('hosts_single_selected_node', 'FAIL', exc)
+    rc, stdout, stderr = command(cfg, ['getent', 'ahostsv4', cfg['TPG_HOST']])
+    resolved = []
+    if rc == 0:
+        for line in stdout.splitlines():
+            parts = line.split()
+            if parts and parts[0] not in resolved:
+                resolved.append(parts[0])
+    add('resolver_single_selected_node', 'PASS' if resolved == ([selected_node] if selected_node else []) else 'FAIL', f'exit={rc} resolved={resolved} stderr={stderr.strip()}')
+    for unit in cfg['REQUIRED_ACTIVE_UNITS_LIST']:
+        rc, stdout, stderr = command(cfg, ['systemctl', 'is-active', unit])
+        status = stdout.strip()
+        add(f'active:{unit}', 'PASS' if rc == 0 and status == 'active' else 'FAIL', f'exit={rc} state={status} stderr={stderr.strip()}')
+    for unit in cfg['REQUIRED_ENABLED_UNITS_LIST']:
+        rc, stdout, stderr = command(cfg, ['systemctl', 'is-enabled', unit])
+        status = stdout.strip()
+        add(f'enabled:{unit}', 'PASS' if rc == 0 and status == 'enabled' else 'FAIL', f'exit={rc} state={status} stderr={stderr.strip()}')
+    for unit in cfg['REQUIRED_INACTIVE_UNITS_LIST']:
+        rc, stdout, stderr = command(cfg, ['systemctl', 'is-active', unit])
+        status = stdout.strip()
+        add(f'inactive:{unit}', 'PASS' if status != 'active' else 'FAIL', f'exit={rc} state={status} stderr={stderr.strip()}')
+    rc, stdout, stderr = command(cfg, ['asterisk', '-rx', f"pjsip show registration {cfg['ASTERISK_REGISTRATION_NAME']}"])
+    registered = rc == 0 and 'Registered' in stdout
+    add('asterisk_registration', 'PASS' if registered else 'FAIL', f'exit={rc} registered={registered} stderr={stderr.strip()}')
+    return checks, selected_node
+
+
+def render(cfg):
+    checks, selected = verify(cfg)
+    failed = sum(item['status'] == 'FAIL' for item in checks)
+    warned = sum(item['status'] == 'WARN' for item in checks)
+    timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
+    status = 'PASS' if failed == 0 else 'FAIL'
+    result = {'schema_version': 1, 'generated_at': timestamp, 'status': status, 'pass_count': sum(item['status'] == 'PASS' for item in checks), 'warn_count': warned, 'fail_count': failed, 'selected_node': selected, 'checks': checks}
+    lines = [f'generated_at={timestamp}', f'status={status}', f'selected_node={selected}', f'pass_count={result["pass_count"]}', f'warn_count={warned}', f'fail_count={failed}']
+    lines.extend(f"{item['status']} {item['name']} {item['detail']}" for item in checks)
+    atomic_write(rooted(cfg, cfg['REPORT_TEXT']), '\n'.join(lines) + '\n')
+    atomic_write(rooted(cfg, cfg['REPORT_JSON']), json.dumps(result, indent=2, sort_keys=True) + '\n')
+    print('\n'.join(lines))
+    return 0 if failed == 0 else 1
+
+
+def self_test():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        for rel in ('etc/test', 'etc/state'):
+            (root/rel).parent.mkdir(parents=True, exist_ok=True)
+        accepted = root/'etc/test'; accepted.write_text('accepted\n')
+        checksum = root/'checks.sha256'; checksum.write_text(f'{sha256_file(accepted)}  /etc/test\n')
+        (root/'etc/hosts').write_text('172.26.0.82 uni-v1.tpg.com.au\n')
+        (root/'etc/node.json').write_text(json.dumps({'nodes': {'172.26.0.82': {'state': 'healthy'}}}))
+        (root/'etc/policy.json').write_text(json.dumps({'selected_node': '172.26.0.82'}))
+        (root/'etc/event.json').write_text(json.dumps({'schema_version': 2, 'stages': {}}))
+        commands = root/'commands'; commands.write_text('#!/bin/sh\nif [ "$1" = getent ]; then echo "172.26.0.82 STREAM uni-v1.tpg.com.au"; exit 0; fi\nif [ "$2" = is-active ]; then case "$3" in old*) echo inactive; exit 3;; *) echo active; exit 0;; esac; fi\nif [ "$2" = is-enabled ]; then echo enabled; exit 0; fi\nif [ "$1" = asterisk ]; then echo Registered; exit 0; fi\nexit 1\n'); commands.chmod(0o750)
+        cfg = config({'ROOT_PREFIX': str(root), 'COMMAND_PREFIX': str(commands), 'CHECKSUM_FILE': '/checks.sha256', 'REPORT_TEXT': '/report.txt', 'REPORT_JSON': '/report.json', 'HOSTS_FILE': '/etc/hosts', 'NODE_STATE_FILE': '/etc/node.json', 'POLICY_STATE_FILE': '/etc/policy.json', 'EVENT_STATE_FILE': '/etc/event.json', 'REQUIRED_ACTIVE_UNITS': 'new.timer', 'REQUIRED_ENABLED_UNITS': 'new.timer', 'REQUIRED_INACTIVE_UNITS': 'old.timer'})
+        assert render(cfg) == 0
+        result = json.loads((root/'report.json').read_text())
+        assert result['status'] == 'PASS' and result['fail_count'] == 0
+        accepted.write_text('changed\n')
+        assert render(cfg) == 1
+        result = json.loads((root/'report.json').read_text())
+        assert result['status'] == 'FAIL' and result['fail_count'] == 1
+    print('self-test passed')
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--self-test', action='store_true')
+    args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        return 0
+    env_file = os.environ.get('ENV_FILE', '/etc/freepbx-wanip-hosts/freepbx-tpg-update-verify.env')
+    try:
+        return render(config(load_env(env_file)))
+    except Exception as exc:
+        print(f'verification error: {exc}', file=sys.stderr)
+        return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -1,0 +1,13 @@
+# Inputs: accepted checksum manifest, verifier environment, runtime JSON state, /etc/hosts, resolver, systemd, and Asterisk registration. Outputs: latest.txt and latest.json verification reports. No remediation is performed.
+[Unit]
+Description=Verify accepted FreePBX TPG update state
+After=network-online.target asterisk.service freepbx-tpg-node-state.service freepbx-tpg-node-policy.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=ENV_FILE=/etc/freepbx-wanip-hosts/freepbx-tpg-update-verify.env
+ExecStart=/usr/local/sbin/freepbx-tpg-update-verify
+User=root
+Group=root
+UMask=0027

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run TPG PJSIP registration watchdog periodically
+
+[Timer]
+OnBootSec=90
+OnUnitActiveSec=30
+AccuracySec=5
+Unit=freepbx-wanip-registration-watchdog.service
+
+[Install]
+WantedBy=timers.target

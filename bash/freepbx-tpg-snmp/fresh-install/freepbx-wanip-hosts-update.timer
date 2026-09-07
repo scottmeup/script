@@ -1,0 +1,11 @@
+[Unit]
+Description=Run FreePBX public IP hosts updater every 1 seconds
+
+[Timer]
+OnBootSec=20
+OnUnitActiveSec=3
+AccuracySec=1
+Unit=freepbx-wanip-hosts-update.service
+
+[Install]
+WantedBy=timers.target

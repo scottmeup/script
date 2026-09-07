@@ -1,0 +1,12 @@
+# Runs Deliverable 1 state evaluation followed by sticky node selection every 60 seconds.
+[Unit]
+Description=Run sticky single-node TPG SIP policy
+
+[Timer]
+OnBootSec=210
+OnUnitActiveSec=60
+AccuracySec=10
+Unit=freepbx-tpg-node-policy.service
+
+[Install]
+WantedBy=timers.target

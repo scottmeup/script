@@ -1,0 +1,370 @@
+#!/usr/bin/env python3
+# Project flow: watch completed TPG PCAP files, wait for stable content, classify each capture with tcpdump before invoking other components, skip empty and irrelevant captures, serialize processing, run Deliverable 1 then Deliverable 2 for relevant state evidence, and run existing outbound recovery only for a configured qualifying INVITE failure. The watcher records every classification and stage result without directly changing node health, /etc/hosts, registration, PJSIP, or recovery algorithms.
+# Inputs: ENV_FILE selects the .env file. WATCH_DIR contains completed .pcap files. INOTIFYWAIT and TCPDUMP are executable paths. STATE_SCRIPT, POLICY_SCRIPT, and OUTBOUND_RECOVERY_SCRIPT are executable paths. STATE_POLICY_INVITE_CODES and STATE_POLICY_REGISTER_FAILURE_CODES are space-separated three-digit SIP response codes. RECOVERY_INVITE_FAILURE_CODES independently controls recovery invocation. POLL_INTERVAL_SECONDS, DEBOUNCE_SECONDS, and STAGE_TIMEOUT_SECONDS are positive values. LOCK_FILE serializes processing. STATE_FILE stores the last classified file and stage results. --once FILE processes one PCAP. --self-test runs deterministic classification, ordering, gating, and duplicate tests.
+# Outputs: STATE_FILE JSON includes exact file identity, classification counts and events, skip reason, completion time, and stage return codes. Journal entries use LOG_TAG. Relevant state evidence causes state then policy execution. Qualifying recovery evidence additionally causes recovery execution. Empty, header-only, unrelated SIP, OPTIONS, and routine REGISTER authentication/success captures invoke no stages.
+# Functions: load_env parses configuration. config validates types and codes. file_identity and wait_until_stable validate completion. parse_capture extracts response code, CSeq method, Call-ID, and source node from tcpdump output. classify_capture determines state and recovery relevance. run_stage executes one bounded stage. process_file performs debounce, locking, classification, stage gating, and persistence. watch consumes inotify events. self_test exercises boundary cases. main selects self-test, one-file, or continuous mode.
+
+import argparse
+import fcntl
+import ipaddress
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+
+def load_env(path):
+    values = {}
+    with open(path, 'r', encoding='utf-8') as handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, value = line.split('=', 1)
+            values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def positive_float(value, key):
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f'{key} must be numeric') from exc
+    if result <= 0:
+        raise ValueError(f'{key} must be greater than zero')
+    return result
+
+
+def positive_int(value, key):
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f'{key} must be an integer') from exc
+    if result < 1:
+        raise ValueError(f'{key} must be at least 1')
+    return result
+
+
+def sip_codes(value, key):
+    result = set(str(value).split())
+    if not result or any(re.fullmatch(r'\d{3}', item) is None for item in result):
+        raise ValueError(f'{key} must contain space-separated three-digit SIP codes')
+    return result
+
+
+def config(values):
+    defaults = {
+        'WATCH_DIR': '/var/log/tpg-sip-pcap',
+        'INOTIFYWAIT': '/usr/bin/inotifywait',
+        'TCPDUMP': '/usr/bin/tcpdump',
+        'STATE_SCRIPT': '/usr/local/sbin/freepbx-tpg-node-state',
+        'POLICY_SCRIPT': '/usr/local/sbin/freepbx-tpg-node-policy',
+        'OUTBOUND_RECOVERY_SCRIPT': '/usr/local/sbin/freepbx-tpg-outbound-failure-recover',
+        'STATE_POLICY_INVITE_CODES': '180 183 200 403 408 500 502 503 504 603',
+        'STATE_POLICY_REGISTER_FAILURE_CODES': '403 408 500 502 503 504',
+        'RECOVERY_INVITE_FAILURE_CODES': '403 503 603',
+        'LOCK_FILE': '/run/freepbx-tpg-node-event-watch.lock',
+        'STATE_FILE': '/etc/freepbx-wanip-hosts/tpg-node-event-watch/state.json',
+        'LOG_TAG': 'freepbx-tpg-node-event-watch',
+        'POLL_INTERVAL_SECONDS': '0.5',
+        'DEBOUNCE_SECONDS': '2',
+        'STAGE_TIMEOUT_SECONDS': '420',
+    }
+    result = {**defaults, **values}
+    result['POLL_INTERVAL'] = positive_float(result['POLL_INTERVAL_SECONDS'], 'POLL_INTERVAL_SECONDS')
+    result['DEBOUNCE'] = positive_float(result['DEBOUNCE_SECONDS'], 'DEBOUNCE_SECONDS')
+    result['STAGE_TIMEOUT'] = positive_int(result['STAGE_TIMEOUT_SECONDS'], 'STAGE_TIMEOUT_SECONDS')
+    result['STATE_INVITE_CODES'] = sip_codes(result['STATE_POLICY_INVITE_CODES'], 'STATE_POLICY_INVITE_CODES')
+    result['STATE_REGISTER_CODES'] = sip_codes(result['STATE_POLICY_REGISTER_FAILURE_CODES'], 'STATE_POLICY_REGISTER_FAILURE_CODES')
+    result['RECOVERY_INVITE_CODES'] = sip_codes(result['RECOVERY_INVITE_FAILURE_CODES'], 'RECOVERY_INVITE_FAILURE_CODES')
+    return result
+
+
+def journal(cfg, message):
+    subprocess.run(['logger', '-t', cfg['LOG_TAG'], message], check=False)
+
+
+def atomic_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + '.', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump(value, handle, indent=2, sort_keys=True)
+            handle.write('\n')
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o640)
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def file_identity(path):
+    stat = path.stat()
+    return {'path': str(path), 'device': stat.st_dev, 'inode': stat.st_ino, 'size': stat.st_size, 'mtime_ns': stat.st_mtime_ns}
+
+
+def load_watch_state(path):
+    try:
+        value = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def same_identity(left, right):
+    return all(left.get(key) == right.get(key) for key in ('path', 'device', 'inode', 'size', 'mtime_ns'))
+
+
+def wait_until_stable(path, cfg):
+    first = file_identity(path)
+    time.sleep(cfg['POLL_INTERVAL'])
+    second = file_identity(path)
+    return second if same_identity(first, second) else None
+
+
+def clean_ip(endpoint):
+    value = endpoint.strip()
+    if value.count('.') >= 4:
+        value = value.rsplit('.', 1)[0]
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        return ''
+
+
+def finalize_packet(packet, output):
+    if packet and packet.get('code') and packet.get('method'):
+        output.append({
+            'node': packet.get('node', ''),
+            'code': packet['code'],
+            'method': packet['method'],
+            'callid': packet.get('callid', ''),
+        })
+
+
+def parse_capture(path, cfg):
+    tool = Path(cfg['TCPDUMP'])
+    if not tool.is_file() or not os.access(tool, os.X_OK):
+        raise RuntimeError(f'tcpdump is not executable: {tool}')
+    result = subprocess.run([str(tool), '-nn', '-tttt', '-r', str(path), '-A', 'udp port 5060'], capture_output=True, text=True, errors='ignore')
+    if result.returncode not in (0, 1):
+        raise RuntimeError(f'tcpdump failed for {path}, exit {result.returncode}: {result.stderr.strip()}')
+    header = re.compile(r'^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?\s+.*?IP\s+([^\s]+)\.5060\s+>\s+([^\s]+)\.5060:', re.I)
+    status = re.compile(r'SIP/2\.0\s+(\d{3})\b', re.I)
+    cseq = re.compile(r'^CSeq:\s*\d+\s+([A-Z]+)\b', re.I)
+    callid = re.compile(r'^(?:Call-ID|i):\s*(\S+)', re.I)
+    events = []
+    packet = None
+    for line in result.stdout.splitlines():
+        match = header.match(line)
+        if match:
+            finalize_packet(packet, events)
+            packet = {'node': clean_ip(match.group(1)), 'code': '', 'method': '', 'callid': ''}
+            found = status.search(line)
+            if found:
+                packet['code'] = found.group(1)
+            continue
+        if packet is None:
+            continue
+        found = status.search(line)
+        if found:
+            packet['code'] = found.group(1)
+        found = cseq.match(line)
+        if found:
+            packet['method'] = found.group(1).upper()
+        found = callid.match(line)
+        if found:
+            packet['callid'] = found.group(1)
+    finalize_packet(packet, events)
+    unique = {}
+    for event in events:
+        key = (event['node'], event['code'], event['method'], event['callid'])
+        unique[key] = event
+    return list(unique.values())
+
+
+def classify_capture(path, cfg):
+    events = parse_capture(path, cfg)
+    state_events = []
+    recovery_events = []
+    for event in events:
+        if event['method'] == 'INVITE' and event['code'] in cfg['STATE_INVITE_CODES']:
+            state_events.append(event)
+        elif event['method'] == 'REGISTER' and event['code'] in cfg['STATE_REGISTER_CODES']:
+            state_events.append(event)
+        if event['method'] == 'INVITE' and event['code'] in cfg['RECOVERY_INVITE_CODES']:
+            recovery_events.append(event)
+    if recovery_events:
+        reason = 'qualifying_outbound_failure'
+    elif state_events:
+        reason = 'relevant_state_evidence'
+    elif events:
+        reason = 'irrelevant_sip_responses'
+    else:
+        reason = 'empty_or_no_complete_sip_response'
+    return {'reason': reason, 'response_event_count': len(events), 'state_events': state_events, 'recovery_events': recovery_events}
+
+
+def run_stage(path, timeout):
+    script = Path(path)
+    if not script.is_file() or not os.access(script, os.X_OK):
+        return 126
+    try:
+        return subprocess.run([str(script)], timeout=timeout).returncode
+    except subprocess.TimeoutExpired:
+        return 124
+
+
+def process_file(path, cfg):
+    if path.suffix.lower() != '.pcap' or not path.is_file():
+        return 0
+    identity = wait_until_stable(path, cfg)
+    if identity is None:
+        journal(cfg, f'deferred unstable file {path}')
+        return 0
+    state_path = Path(cfg['STATE_FILE'])
+    previous = load_watch_state(state_path)
+    if same_identity(previous.get('file', {}), identity) and time.time() - float(previous.get('completed_epoch', 0)) < cfg['DEBOUNCE']:
+        journal(cfg, f'skipped duplicate completed file {path}')
+        return 0
+    lock_fd = os.open(cfg['LOCK_FILE'], os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        previous = load_watch_state(state_path)
+        if same_identity(previous.get('file', {}), identity) and time.time() - float(previous.get('completed_epoch', 0)) < cfg['DEBOUNCE']:
+            return 0
+        classification = classify_capture(path, cfg)
+        stages = {}
+        relevant = bool(classification['state_events'])
+        recovery_relevant = bool(classification['recovery_events'])
+        if relevant:
+            for name, script in (('state', cfg['STATE_SCRIPT']), ('policy', cfg['POLICY_SCRIPT'])):
+                rc = run_stage(script, cfg['STAGE_TIMEOUT'])
+                stages[name] = rc
+                journal(cfg, f'{name} stage exit={rc} file={path}')
+                if rc != 0:
+                    break
+            if all(stages.get(name) == 0 for name in ('state', 'policy')) and recovery_relevant:
+                rc = run_stage(cfg['OUTBOUND_RECOVERY_SCRIPT'], cfg['STAGE_TIMEOUT'])
+                stages['recovery'] = rc
+                journal(cfg, f'recovery stage exit={rc} file={path}')
+        value = {
+            'schema_version': 2,
+            'file': identity,
+            'completed_epoch': time.time(),
+            'classification': classification,
+            'stages': stages,
+        }
+        atomic_json(state_path, value)
+        if not relevant:
+            journal(cfg, f"skipped file={path} reason={classification['reason']} responses={classification['response_event_count']}")
+        elif not recovery_relevant:
+            journal(cfg, f'completed state-policy only file={path} reason={classification["reason"]}')
+        return next((rc for rc in stages.values() if rc != 0), 0)
+    finally:
+        os.close(lock_fd)
+
+
+def watch(cfg):
+    watch_dir = Path(cfg['WATCH_DIR'])
+    tool = Path(cfg['INOTIFYWAIT'])
+    if not watch_dir.is_dir():
+        raise RuntimeError(f'watch directory does not exist: {watch_dir}')
+    if not tool.is_file() or not os.access(tool, os.X_OK):
+        raise RuntimeError(f'inotifywait is not executable: {tool}')
+    process = subprocess.Popen([str(tool), '-m', '-q', '-e', 'close_write,moved_to', '--format', '%w%f', str(watch_dir)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if process.stdout is None:
+        raise RuntimeError('inotifywait stdout unavailable')
+    journal(cfg, f'watching {watch_dir} with SIP classification')
+    for raw in process.stdout:
+        path = Path(raw.rstrip('\n'))
+        rc = process_file(path, cfg)
+        if rc != 0:
+            journal(cfg, f'pipeline failed exit={rc} file={path}')
+    return process.wait()
+
+
+def make_tool(path, output):
+    path.write_text('#!/bin/sh\ncat <<\'EOF\'\n' + output + '\nEOF\n', encoding='utf-8')
+    path.chmod(0o750)
+
+
+def self_test():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        order = root / 'order'
+        stage_paths = {}
+        for name in ('state', 'policy', 'recovery'):
+            script = root / name
+            script.write_text(f'#!/bin/sh\necho {name} >> "{order}"\n', encoding='utf-8')
+            script.chmod(0o750)
+            stage_paths[name] = script
+        pcap = root / 'test.pcap'
+        pcap.write_bytes(b'fixture')
+        tcpdump = root / 'tcpdump'
+        make_tool(tcpdump, '')
+        cfg = config({'WATCH_DIR': str(root), 'TCPDUMP': str(tcpdump), 'STATE_SCRIPT': str(stage_paths['state']), 'POLICY_SCRIPT': str(stage_paths['policy']), 'OUTBOUND_RECOVERY_SCRIPT': str(stage_paths['recovery']), 'LOCK_FILE': str(root/'lock'), 'STATE_FILE': str(root/'watch.json'), 'POLL_INTERVAL_SECONDS': '0.01', 'DEBOUNCE_SECONDS': '30', 'STAGE_TIMEOUT_SECONDS': '5'})
+        assert process_file(pcap, cfg) == 0
+        assert not order.exists()
+        saved = json.loads((root/'watch.json').read_text())
+        assert saved['classification']['reason'] == 'empty_or_no_complete_sip_response' and saved['stages'] == {}
+        make_tool(tcpdump, '2026-09-07 21:00:00.000000 eth0 In IP 172.26.0.82.5060 > 192.168.1.25.5060: SIP: SIP/2.0 200 OK\nSIP/2.0 200 OK\nCall-ID: success\nCSeq: 10 INVITE')
+        pcap.write_bytes(b'success')
+        assert process_file(pcap, cfg) == 0
+        assert order.read_text().splitlines() == ['state', 'policy']
+        make_tool(tcpdump, '2026-09-07 21:00:01.000000 eth0 In IP 172.26.0.33.5060 > 192.168.1.25.5060: SIP: SIP/2.0 403 Forbidden\nSIP/2.0 403 Forbidden\nCall-ID: failure\nCSeq: 11 INVITE')
+        pcap.write_bytes(b'failure')
+        assert process_file(pcap, cfg) == 0
+        assert order.read_text().splitlines() == ['state', 'policy', 'state', 'policy', 'recovery']
+        before = order.read_text()
+        assert process_file(pcap, cfg) == 0 and order.read_text() == before
+        make_tool(tcpdump, '2026-09-07 21:00:02.000000 eth0 In IP 172.26.0.82.5060 > 192.168.1.25.5060: SIP: SIP/2.0 200 OK\nSIP/2.0 200 OK\nCall-ID: register\nCSeq: 12 REGISTER')
+        pcap.write_bytes(b'register')
+        assert process_file(pcap, cfg) == 0 and order.read_text() == before
+        stage_paths['state'].write_text(f'#!/bin/sh\necho state-fail >> "{order}"\nexit 7\n', encoding='utf-8')
+        stage_paths['state'].chmod(0o750)
+        make_tool(tcpdump, '2026-09-07 21:00:03.000000 eth0 In IP 172.26.0.33.5060 > 192.168.1.25.5060: SIP: SIP/2.0 503 Service Unavailable\nSIP/2.0 503 Service Unavailable\nCall-ID: failure2\nCSeq: 13 INVITE')
+        pcap.write_bytes(b'failure2')
+        assert process_file(pcap, cfg) == 7
+        assert order.read_text().splitlines()[-1] == 'state-fail'
+        saved = json.loads((root/'watch.json').read_text())
+        assert saved['stages'] == {'state': 7}
+    print('self-test passed')
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--once')
+    parser.add_argument('--self-test', action='store_true')
+    args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        return 0
+    env_file = os.environ.get('ENV_FILE', '/etc/freepbx-wanip-hosts/freepbx-tpg-node-event-watch.env')
+    if not os.path.exists(env_file):
+        print(f'ENV file not readable: {env_file}', file=sys.stderr)
+        return 10
+    cfg = None
+    try:
+        cfg = config(load_env(env_file))
+        if args.once:
+            return process_file(Path(args.once), cfg)
+        return watch(cfg)
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        if cfg is not None:
+            journal(cfg, f'watcher failed: {exc}')
+        return 12
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -1,0 +1,13 @@
+# Input: /etc/freepbx-wanip-hosts/freepbx-tpg-node-state.env and passive SIP evidence. Output: persistent node-state JSON and summary. This unit makes no routing or registration changes.
+[Unit]
+Description=Evaluate persistent TPG SIP node state
+After=network-online.target asterisk.service freepbx-tpg-sip-health-check.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=ENV_FILE=/etc/freepbx-wanip-hosts/freepbx-tpg-node-state.env
+ExecStart=/usr/local/sbin/freepbx-tpg-node-state
+User=root
+Group=root
+UMask=0027

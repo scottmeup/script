@@ -1,0 +1,30 @@
+Target host: a configured FreePBX 17 Debian host
+Canonical working directory: /home/andrewscott/freepbx-tpg-fresh-install
+
+Prerequisites:
+- FreePBX 17 and Asterisk are installed and running.
+- A working PJSIP registration named TPG-VoIP already exists.
+- Commands python3, systemctl, tcpdump, inotifywait, asterisk, getent and sha256sum are installed.
+- The host can reach the TPG SIP service, router SNMP endpoint and configured Tasmota endpoint.
+- Run when no call is active because the installer starts policy and recovery services.
+
+Procedure:
+1. Put every fresh-install file in the canonical working directory.
+2. Verify downloads:
+   cd /home/andrewscott/freepbx-tpg-fresh-install
+   sha256sum -c freepbx-tpg-fresh-install.sha256
+3. Edit freepbx-tpg-fresh-install.env locally. Set SNMP_COMMUNITY and verify every site value. Do not send the completed secret-bearing file back to Copilot.
+4. Install:
+   cd /home/andrewscott/freepbx-tpg-fresh-install
+   chmod 750 install-freepbx-tpg-fresh.sh rollback-freepbx-tpg-fresh.sh
+   sudo ./install-freepbx-tpg-fresh.sh
+5. Verify:
+   sudo cat /etc/freepbx-wanip-hosts/tpg-update-verification/latest.txt
+   sudo systemctl status freepbx-tpg-update-verify.timer --no-pager -l
+   getent ahostsv4 uni-v1.tpg.com.au
+6. Place and answer one outbound call. Run the verifier again and require status=PASS.
+7. Roll back if required:
+   cd /home/andrewscott/freepbx-tpg-fresh-install
+   sudo ./rollback-freepbx-tpg-fresh.sh
+
+The installer does not create or edit the FreePBX PJSIP trunk. It installs the accepted supplementary node state, sticky selection, event filtering, recovery, WAN-IP update, monitoring and verification stack. It captures pre-existing target files and unit states before installation and auto-restores on failure.

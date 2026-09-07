@@ -1,0 +1,13 @@
+[Unit]
+Description=Low-noise monitor for TPG SIP node error responses
+After=network-online.target asterisk.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/tpg-sip-error-monitor
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

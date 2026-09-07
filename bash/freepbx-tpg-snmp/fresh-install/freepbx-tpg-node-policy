@@ -1,0 +1,363 @@
+#!/usr/bin/env python3
+# Project flow: read persistent node state from Deliverable 1, retain one selected healthy node when possible, otherwise choose exactly one eligible healthy or un-errored node, defer selection changes during active trunk calls, atomically replace only the managed TPG hostname block in /etc/hosts, and invoke existing registration recovery only after an actual node change. Ping is never used as health evidence.
+# Inputs: ENV_FILE selects the .env configuration. NODE_STATE_FILE is JSON containing resolved_nodes and per-node state. HOSTS_FILE is the hosts-format file to update. TPG_HOST is the managed hostname. TRUNK_NAME identifies trunk channels. REGISTRATION_RECOVERY_SCRIPT is an executable. STATE_FILE records policy outcomes. BACKUP_DIR stores pre-change hosts snapshots. LOCK_FILE prevents concurrent writers. DRY_RUN and --dry-run suppress changes.
+# Outputs: exactly one node in the managed hosts block when a candidate exists; an atomic policy-state JSON file; timestamped hosts backups before changes; journal records under LOG_TAG; registration recovery after a real node change. Exit 0 means unchanged, changed, dry-run, or safely deferred. Nonzero means invalid evidence, configuration, host structure, or failed recovery.
+# Functions: load_env parses key-value configuration. config validates values. read_node_state normalizes persistent state. read_managed_nodes inspects the new managed block. choose_node implements sticky priority. active_trunk_call protects calls. render_hosts removes old and new managed blocks and writes one node. atomic_write persists files. save_policy_state records decisions. recover_registration invokes recovery. main coordinates evaluation and change control.
+
+import argparse
+import datetime as dt
+import fcntl
+import ipaddress
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+VALID_STATES = {'un-errored', 'healthy', 'unhealthy'}
+
+
+def load_env(path):
+    values = {}
+    with open(path, 'r', encoding='utf-8') as handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, value = line.split('=', 1)
+            values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def parse_bool(value, key):
+    normalized = str(value).strip().lower()
+    if normalized in {'yes', 'true', '1', 'on'}:
+        return True
+    if normalized in {'no', 'false', '0', 'off'}:
+        return False
+    raise ValueError(f'{key} must be yes or no')
+
+
+def config(values):
+    defaults = {
+        'TPG_HOST': 'uni-v1.tpg.com.au',
+        'TRUNK_NAME': 'TPG-VoIP',
+        'NODE_STATE_FILE': '/etc/freepbx-wanip-hosts/tpg-node-state/node-state.json',
+        'HOSTS_FILE': '/etc/hosts',
+        'STATE_FILE': '/etc/freepbx-wanip-hosts/tpg-node-policy/policy-state.json',
+        'BACKUP_DIR': '/etc/freepbx-wanip-hosts/tpg-node-policy/hosts-backups',
+        'LOCK_FILE': '/run/freepbx-tpg-node-policy.lock',
+        'LOG_TAG': 'freepbx-tpg-node-policy',
+        'REGISTRATION_RECOVERY_SCRIPT': '/usr/local/sbin/freepbx-wanip-registration-recover',
+        'RUN_REGISTRATION_RECOVERY_ON_CHANGE': 'yes',
+        'REGISTRATION_RECOVERY_TIMEOUT_SECONDS': '360',
+        'REQUIRE_ELIGIBLE_NODE': 'yes',
+        'DRY_RUN': 'no',
+    }
+    result = {**defaults, **values}
+    result['RUN_RECOVERY'] = parse_bool(result['RUN_REGISTRATION_RECOVERY_ON_CHANGE'], 'RUN_REGISTRATION_RECOVERY_ON_CHANGE')
+    result['REQUIRE_CANDIDATE'] = parse_bool(result['REQUIRE_ELIGIBLE_NODE'], 'REQUIRE_ELIGIBLE_NODE')
+    result['ENV_DRY_RUN'] = parse_bool(result['DRY_RUN'], 'DRY_RUN')
+    try:
+        result['RECOVERY_TIMEOUT'] = int(result['REGISTRATION_RECOVERY_TIMEOUT_SECONDS'])
+    except ValueError as exc:
+        raise ValueError('REGISTRATION_RECOVERY_TIMEOUT_SECONDS must be an integer') from exc
+    if result['RECOVERY_TIMEOUT'] < 1:
+        raise ValueError('REGISTRATION_RECOVERY_TIMEOUT_SECONDS must be at least 1')
+    return result
+
+
+def log(cfg, message):
+    subprocess.run(['logger', '-t', cfg['LOG_TAG'], message], check=False)
+
+
+def valid_ip(value):
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
+def safe_nonnegative_integer(value, key, node):
+    if isinstance(value, bool):
+        raise RuntimeError(f'node {node} {key} must be a non-negative integer')
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f'node {node} {key} must be a non-negative integer') from exc
+    if parsed < 0:
+        raise RuntimeError(f'node {node} {key} must be a non-negative integer')
+    return parsed
+
+
+def read_node_state(path):
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except Exception as exc:
+        raise RuntimeError(f'cannot read node state: {exc}') from exc
+    if not isinstance(data, dict):
+        raise RuntimeError('node state root must be an object')
+    resolved_raw = data.get('resolved_nodes')
+    nodes_raw = data.get('nodes')
+    if not isinstance(resolved_raw, list) or not isinstance(nodes_raw, dict):
+        raise RuntimeError('node state must contain resolved_nodes list and nodes object')
+    resolved = []
+    nodes = {}
+    for raw in resolved_raw:
+        node = str(raw)
+        if not valid_ip(node) or node in nodes:
+            continue
+        entry = nodes_raw.get(node)
+        if not isinstance(entry, dict) or entry.get('state') not in VALID_STATES:
+            raise RuntimeError(f'node {node} has no valid persistent state')
+        resolved.append(node)
+        nodes[node] = {
+            'state': entry['state'],
+            'state_since_epoch': safe_nonnegative_integer(entry.get('state_since_epoch', 0), 'state_since_epoch', node),
+            'last_healthy_epoch': safe_nonnegative_integer(entry.get('last_healthy_epoch', 0), 'last_healthy_epoch', node),
+            'reason': str(entry.get('reason', '')),
+        }
+    if not resolved:
+        raise RuntimeError('node state contains no valid resolved nodes')
+    generation = data.get('generation', 0)
+    if isinstance(generation, bool):
+        raise RuntimeError('node state generation must be a non-negative integer')
+    try:
+        generation = int(generation)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError('node state generation must be a non-negative integer') from exc
+    if generation < 0:
+        raise RuntimeError('node state generation must be a non-negative integer')
+    return {'resolved': resolved, 'nodes': nodes, 'generation': generation}
+
+
+def markers(host):
+    return f'# BEGIN FREEPBX-TPG-NODE-POLICY {host}', f'# END FREEPBX-TPG-NODE-POLICY {host}'
+
+
+def read_managed_nodes(lines, host):
+    begin, end = markers(host)
+    inside = False
+    begins = 0
+    ends = 0
+    selected = []
+    for raw in lines:
+        line = raw.strip()
+        if line == begin:
+            if inside:
+                raise RuntimeError('nested managed hosts block')
+            inside = True
+            begins += 1
+            continue
+        if line == end:
+            if not inside:
+                raise RuntimeError('managed hosts block end without begin')
+            inside = False
+            ends += 1
+            continue
+        if inside and line and not line.startswith('#'):
+            parts = line.split()
+            if len(parts) >= 2 and host in parts[1:] and valid_ip(parts[0]):
+                selected.append(parts[0])
+    if inside or begins != ends or begins > 1:
+        raise RuntimeError('invalid managed hosts block structure')
+    return selected
+
+
+def choose_node(state, current_nodes):
+    nodes = state['nodes']
+    current = current_nodes[0] if len(current_nodes) == 1 else ''
+    if current and current in nodes and nodes[current]['state'] == 'healthy':
+        return current, 'retain_current_healthy'
+    healthy = [node for node in state['resolved'] if nodes[node]['state'] == 'healthy']
+    if healthy:
+        order = {node: index for index, node in enumerate(state['resolved'])}
+        healthy.sort(key=lambda node: (-nodes[node]['last_healthy_epoch'], order[node]))
+        return healthy[0], 'select_most_recent_healthy'
+    if current and current in nodes and nodes[current]['state'] == 'un-errored':
+        return current, 'retain_current_unerrored'
+    unerrored = [node for node in state['resolved'] if nodes[node]['state'] == 'un-errored']
+    if unerrored:
+        return unerrored[0], 'select_first_unerrored'
+    return '', 'no_eligible_node'
+
+
+def active_trunk_call(cfg):
+    result = subprocess.run(['asterisk', '-rx', 'core show channels concise'], capture_output=True, text=True, errors='ignore')
+    if result.returncode != 0:
+        raise RuntimeError(f'cannot inspect active channels, exit {result.returncode}')
+    return f"PJSIP/{cfg['TRUNK_NAME']}-" in result.stdout
+
+
+def render_hosts(lines, host, selected):
+    new_pair = markers(host)
+    old_pair = (f'# BEGIN FREEPBX-TPG-SIP-HEALTH-POLICY {host}', f'# END FREEPBX-TPG-SIP-HEALTH-POLICY {host}')
+    pairs = (new_pair, old_pair)
+    output = []
+    inside = None
+    for raw in lines:
+        line = raw.strip()
+        starting = next((pair for pair in pairs if line == pair[0]), None)
+        if starting is not None:
+            if inside is not None:
+                raise RuntimeError('nested managed hosts blocks')
+            inside = starting
+            continue
+        if inside is not None and line == inside[1]:
+            inside = None
+            continue
+        if inside is not None:
+            continue
+        if line and not line.startswith('#'):
+            parts = line.split()
+            if len(parts) >= 2 and host in parts[1:]:
+                continue
+        output.append(raw.rstrip('\n'))
+    if inside is not None:
+        raise RuntimeError('unterminated managed hosts block')
+    while output and output[-1] == '':
+        output.pop()
+    output.extend([new_pair[0], f'{selected} {host}', new_pair[1]])
+    return '\n'.join(output) + '\n'
+
+
+def atomic_write(path, content, mode):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + '.', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def save_policy_state(cfg, selected, reason, changed, deferred, generation):
+    now = int(time.time())
+    value = {
+        'schema_version': 1,
+        'generated_at': dt.datetime.fromtimestamp(now, dt.timezone.utc).isoformat(),
+        'selected_node': selected,
+        'reason': reason,
+        'changed': bool(changed),
+        'deferred_for_active_call': bool(deferred),
+        'node_state_generation': generation,
+    }
+    atomic_write(Path(cfg['STATE_FILE']), json.dumps(value, indent=2, sort_keys=True) + '\n', 0o640)
+
+
+def recover_registration(cfg):
+    script = Path(cfg['REGISTRATION_RECOVERY_SCRIPT'])
+    if not script.is_file() or not os.access(script, os.X_OK):
+        raise RuntimeError(f'registration recovery script is not executable: {script}')
+    env = os.environ.copy()
+    env['FORCE_INITIAL_REGISTER'] = 'yes'
+    env['ASTERISK_RESTART_ON_REGISTRATION_FAILURE'] = 'no'
+    try:
+        result = subprocess.run([str(script)], env=env, timeout=cfg['RECOVERY_TIMEOUT'])
+    except subprocess.TimeoutExpired:
+        return 124
+    return result.returncode
+
+
+def self_test():
+    state = {'resolved': ['172.26.0.33', '172.26.0.82', '172.26.0.97'], 'nodes': {
+        '172.26.0.33': {'state': 'unhealthy', 'last_healthy_epoch': 10},
+        '172.26.0.82': {'state': 'healthy', 'last_healthy_epoch': 30},
+        '172.26.0.97': {'state': 'un-errored', 'last_healthy_epoch': 0},
+    }, 'generation': 0}
+    assert choose_node(state, ['172.26.0.82']) == ('172.26.0.82', 'retain_current_healthy')
+    assert choose_node(state, ['172.26.0.33']) == ('172.26.0.82', 'select_most_recent_healthy')
+    state['nodes']['172.26.0.82']['state'] = 'unhealthy'
+    assert choose_node(state, ['172.26.0.97']) == ('172.26.0.97', 'retain_current_unerrored')
+    text = render_hosts(['127.0.0.1 localhost', '# keep', '# BEGIN FREEPBX-TPG-SIP-HEALTH-POLICY uni-v1.tpg.com.au', '172.26.0.33 uni-v1.tpg.com.au', '172.26.0.97 uni-v1.tpg.com.au', '# END FREEPBX-TPG-SIP-HEALTH-POLICY uni-v1.tpg.com.au'], 'uni-v1.tpg.com.au', '172.26.0.82')
+    assert text.count('172.26.0.82 uni-v1.tpg.com.au') == 1
+    assert '172.26.0.33 uni-v1.tpg.com.au' not in text
+    assert 'SIP-HEALTH-POLICY' not in text
+    assert '# keep' in text
+    print('self-test passed')
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--self-test', action='store_true')
+    args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        return 0
+    env_file = os.environ.get('ENV_FILE', '/etc/freepbx-wanip-hosts/freepbx-tpg-node-policy.env')
+    if not os.path.exists(env_file):
+        print(f'ENV file not readable: {env_file}', file=sys.stderr)
+        return 10
+    cfg = None
+    try:
+        cfg = config(load_env(env_file))
+        lock_fd = os.open(cfg['LOCK_FILE'], os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        state = read_node_state(Path(cfg['NODE_STATE_FILE']))
+        hosts_path = Path(cfg['HOSTS_FILE'])
+        lines = hosts_path.read_text(encoding='utf-8', errors='strict').splitlines()
+        current_nodes = read_managed_nodes(lines, cfg['TPG_HOST'])
+        selected, reason = choose_node(state, current_nodes)
+        if not selected:
+            if cfg['REQUIRE_CANDIDATE']:
+                raise RuntimeError('no healthy or un-errored node is eligible')
+            print('no eligible node; no change')
+            return 0
+        changed = current_nodes != [selected]
+        dry_run = args.dry_run or cfg['ENV_DRY_RUN']
+        if not changed:
+            if not dry_run:
+                save_policy_state(cfg, selected, reason, False, False, state['generation'])
+            print(f'unchanged {cfg["TPG_HOST"]}: {selected} reason={reason}')
+            return 0
+        if active_trunk_call(cfg):
+            if not dry_run:
+                save_policy_state(cfg, selected, reason, False, True, state['generation'])
+                log(cfg, f'deferred selection change to {selected}; active {cfg["TRUNK_NAME"]} call')
+            print(f'deferred {cfg["TPG_HOST"]}: {selected} reason=active_trunk_call')
+            return 0
+        new_hosts = render_hosts(lines, cfg['TPG_HOST'], selected)
+        if dry_run:
+            print(new_hosts, end='')
+            print(f'# selection={selected} reason={reason}', file=sys.stderr)
+            return 0
+        backup_dir = Path(cfg['BACKUP_DIR'])
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup = backup_dir / f'hosts.{time.time_ns()}'
+        shutil.copy2(hosts_path, backup)
+        atomic_write(hosts_path, new_hosts, hosts_path.stat().st_mode & 0o777)
+        save_policy_state(cfg, selected, reason, True, False, state['generation'])
+        log(cfg, f'applied single-node policy {cfg["TPG_HOST"]}={selected} reason={reason} backup={backup}')
+        if cfg['RUN_RECOVERY']:
+            rc = recover_registration(cfg)
+            if rc != 0:
+                log(cfg, f'registration recovery failed after selecting {selected}, exit={rc}')
+                return 30
+            log(cfg, f'registration recovery completed after selecting {selected}')
+        print(f'applied {cfg["TPG_HOST"]}: {selected} reason={reason}')
+        return 0
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        if cfg is not None:
+            log(cfg, f'policy failed: {exc}')
+        return 12
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -1,0 +1,11 @@
+# install file to
+# /etc/systemd/system/freepbx-tpg-outbound-failure-recover.service
+
+[Unit]
+Description=Recover TPG outbound INVITE failure state
+After=network-online.target asterisk.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/freepbx-tpg-outbound-failure-recover

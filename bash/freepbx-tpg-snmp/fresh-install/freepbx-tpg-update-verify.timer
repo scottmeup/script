@@ -1,0 +1,13 @@
+# Runs the read-only accepted-state verifier every 15 minutes.
+[Unit]
+Description=Periodically verify accepted FreePBX TPG update state
+
+[Timer]
+OnBootSec=300
+OnUnitActiveSec=900
+AccuracySec=30
+Persistent=true
+Unit=freepbx-tpg-update-verify.service
+
+[Install]
+WantedBy=timers.target

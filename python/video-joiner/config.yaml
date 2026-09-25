@@ -4,40 +4,61 @@ paths:
 
 dry_run: true
 
-output_dir: /mnt/sdc1/temp/joined_cycle_videos/output
+output_dir: /videos/output
+
+filesystem_time:
+  field: ctime
+
+import_event:
+  max_gap_seconds: 30
+
+sequence:
+  enabled: true
+  minimum_value: 1
+  reset_detection: true
+  require_strict_increase: true
+  on_inconsistency: fback-warn
 
 grouping:
-  max_gap_seconds: 600
+  max_adjacent_timestamp_difference_seconds: 720
+  continuity_check:
+    enabled: true
+    tolerance_seconds: 3.0
+  same_source_overlap:
+    tolerance_seconds: 3.0
+    action: warn
 
 normalize_inputs:
-  resolution_value: 1280x720
   resolution: match_first
   fps: match_first
 
-watcher:
-  delay_seconds: 30
-  run_ingest_before_processing: true
-  watch_dirs:
-    - path: /videos/front
-      require_exists: true
-    - path: /mnt/import
-      require_exists: false
-  move:
-    enabled: true
-    dest: /videos/staging
-
-sources:
-  - name: Front
-    path: /videos/front
-    datetime_format: YYYY_MMDD_HHMMSS_nnn
-    offset_seconds: 0.0
-    drift_seconds_per_hour: 0.0
-
-  - name: Rear
-    path: /videos/rear
-    datetime_format: YYYY_MMDD_HHMMSS_nnn
-    offset_seconds: -1.25
-    drift_seconds_per_hour: 0.005
+encoding:
+  mode: copy_if_possible
+  fallback: explicit
+  copy_if_possible:
+    require_all_streams_compatible: true
+    allow_metadata_rotation: true
+  explicit:
+    container: mp4
+    video_codec: libx264
+    crf: 20
+    preset: medium
+    pix_fmt: yuv420p
+    audio_codec: aac
+    audio_bitrate: 192k
+  source:
+    source_name: Front
+    container: match_source
+    encoder_map:
+      h264:
+        - libx264
+        - h264_nvenc
+      hevc:
+        - libx265
+        - hevc_nvenc
+      av1:
+        - libsvtav1
+        - libaom-av1
 
 sync:
   mode: sync_points
@@ -46,6 +67,60 @@ sync:
       reference_time: 2026-05-16T10:00:00
       target_camera: Rear
       target_time: 2026-05-16T09:00:05
+
+audio:
+  mode: mix
+  on_missing_audio: silence
+  normalize: false
+  sources:
+    - source: Front
+      level_db: 0.0
+    - source: Rear
+      level_db: -3.0
+  selections:
+    - source: Front
+      start_seconds: 0.0
+      end_seconds: null
+      level_db: 0.0
+
+dry_run_output:
+  format: text
+  file: /videos/output/dry-run-report.json
+
+sources:
+  - name: Front
+    path: /videos/front
+    extensions:
+      - MP4
+    datetime_format: YYYY_MMDD_HHMMSS_nnn
+    offset_seconds: 0.0
+    drift_seconds_per_hour: 0.0
+    filters:
+      rotate:
+        degrees: 180
+        mode: metadata
+        fallback: physical
+      scale:
+        mode: none
+      fps:
+        mode: match_first
+
+  - name: Rear
+    path: /videos/rear
+    extensions:
+      - MP4
+    datetime_format: YYYY_MMDD_HHMMSS_nnn
+    offset_seconds: -1.25
+    drift_seconds_per_hour: 0.005
+    filters:
+      rotate:
+        degrees: 0
+        mode: none
+        fallback: physical
+      scale:
+        mode: none
+      fps:
+        mode: match_first
 
 output_mode:
   type: stack

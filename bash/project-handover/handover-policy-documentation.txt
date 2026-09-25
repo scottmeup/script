@@ -1,0 +1,402 @@
+# FILE: handover-policy.env
+#
+# PURPOSE:
+#   Defines the operational policy used by update-project-handover.sh to validate,
+#   preserve, install, version, and optionally synchronize a project's canonical
+#   handover. One policy belongs to one project and must be stored in that
+#   project's directory. The updater derives the project directory from the
+#   directory containing this file.
+#
+# FILE FORMAT:
+#   Use one KEY=VALUE record per line.
+#   Blank lines are allowed.
+#   Lines whose first character is # are comments and are ignored.
+#   Keys may contain only uppercase A-Z letters, digits, and underscores.
+#   Duplicate keys are rejected.
+#   Every key documented below is required, including keys whose value is empty
+#   for the selected history mode.
+#   Values are strings. Do not quote values unless literal quote characters are
+#   intended to become part of the value.
+#   Shell expansion, command substitution, variable interpolation, and escape
+#   processing are not performed because the updater parses this file as data.
+#   Do not place spaces around = unless spaces are intentionally part of a value.
+#   Paths should be absolute to avoid dependence on the invocation directory.
+#   Do not store passwords, access tokens, private keys, authentication cookies,
+#   passphrases, or other secrets in this file.
+#
+# PROJECT LOCATION RULE:
+#   The project directory is the directory containing handover-policy.env.
+#   HANDOVER_CANONICAL_PATH must resolve to a file inside that project directory.
+#   For Git history modes, the project directory must be either the configured
+#   Git repository root or a descendant of that repository root.
+#
+# REQUIRED KEY: HANDOVER_POLICY_VERSION
+#   Practical type: schema-version integer represented as text.
+#   Supported values:
+#     1
+#   Meaning:
+#     Selects the policy schema understood by the updater.
+#   Constraints:
+#     Must be present and must currently equal 1.
+#   Used by:
+#     Policy validation before any installation or history operation.
+#
+# REQUIRED KEY: HANDOVER_HISTORY_MODE
+#   Practical type: enumeration.
+#   Supported values:
+#     git-local
+#       Back up the prior handover and policy, atomically install the accepted
+#       candidate, stage the derived project scope, and create a local Git commit.
+#       No remote fetch or push is performed.
+#
+#     git-remote
+#       Perform git-local behavior, validate and fetch the configured remote,
+#       reject a local branch that is behind or diverged, push when enabled, and
+#       verify that the remote branch contains the exact created commit.
+#
+#     timestamped-backups
+#       Back up the prior handover and policy to a timestamped directory and
+#       atomically install the accepted candidate without using Git.
+#   Constraints:
+#     Must be one of the three supported values above.
+#   Used by:
+#     Backup location selection, repository validation, commit behavior, remote
+#     synchronization, and top-level execution dispatch.
+#
+# REQUIRED KEY: HANDOVER_CANONICAL_PATH
+#   Practical type: absolute filesystem path to the accepted canonical handover.
+#   Example form:
+#     /absolute/project/path/PROJECT-HANDOVER.txt
+#   Constraints:
+#     Must resolve to a path inside the directory containing handover-policy.env.
+#     Must end in .txt when HANDOVER_FORMAT=plain-text.
+#     Must end in .md when HANDOVER_FORMAT=markdown.
+#     The parent project directory must already exist.
+#     The file may be absent when the first candidate is installed.
+#   Used by:
+#     Candidate comparison, preservation validation, backup, atomic installation,
+#     checksum verification, failure restoration, and result reporting.
+#
+# REQUIRED KEY: HANDOVER_FORMAT
+#   Practical type: enumeration.
+#   Supported values:
+#     plain-text
+#       Requires HANDOVER_CANONICAL_PATH to end in .txt.
+#
+#     markdown
+#       Requires HANDOVER_CANONICAL_PATH to end in .md.
+#   Constraints:
+#     Must match the canonical handover filename extension.
+#   Used by:
+#     Candidate format and canonical-path validation.
+#
+# REQUIRED KEY: HANDOVER_HISTORY_DIR
+#   Practical type: absolute directory path or empty string.
+#   Value rules by history mode:
+#     HANDOVER_HISTORY_MODE=timestamped-backups
+#       Must be nonempty. Each update creates a UTC timestamped child directory
+#       beneath this directory and stores the prior canonical handover, when one
+#       exists, and a copy of handover-policy.env there.
+#
+#     HANDOVER_HISTORY_MODE=git-local
+#       May be empty. The updater currently stores pre-installation backups under
+#       PROJECT_DIRECTORY/.handover-backups/TIMESTAMP rather than using this key.
+#
+#     HANDOVER_HISTORY_MODE=git-remote
+#       May be empty. The updater currently stores pre-installation backups under
+#       PROJECT_DIRECTORY/.handover-backups/TIMESTAMP rather than using this key.
+#   Constraints:
+#     Required as a key even when the value is empty.
+#   Used by:
+#     Backup destination selection in timestamped-backups mode.
+#
+# REQUIRED KEY: HANDOVER_AUTHORITY_MODE
+#   Practical type: enumeration controlling what proves that a candidate may be
+#   installed as the authoritative handover.
+#   Supported values:
+#     explicit-user-acceptance
+#       The updater invocation must include --accept.
+#
+#     successful-documentation-validation
+#       The updater invocation must include --documentation-validated.
+#
+#     successful-deployment
+#       The updater invocation must include --deployment-succeeded.
+#   Constraints:
+#     Must be one of the three supported values above.
+#     The command-line flag is an assertion supplied to the updater. The updater
+#     does not independently perform the external documentation validation or
+#     technical deployment represented by that assertion.
+#   Used by:
+#     Authority validation before candidate installation.
+#
+# REQUIRED KEY: GIT_REPOSITORY_PATH
+#   Practical type: absolute path to the Git repository root or empty string.
+#   Value rules by history mode:
+#     HANDOVER_HISTORY_MODE=git-local
+#       Must be nonempty and must resolve to the exact Git worktree root.
+#
+#     HANDOVER_HISTORY_MODE=git-remote
+#       Must be nonempty and must resolve to the exact Git worktree root.
+#
+#     HANDOVER_HISTORY_MODE=timestamped-backups
+#       May be empty because Git is not used.
+#   Constraints for Git modes:
+#     The project directory containing handover-policy.env must be the repository
+#     root or a descendant of it.
+#     The active branch must equal GIT_BRANCH.
+#     The repository must have no pre-existing staged changes.
+#     When the project is a subdirectory, modified or untracked files outside the
+#     project scope cause the update to stop.
+#   Used by:
+#     Repository identity checks, project-scope derivation, staging, commit,
+#     remote operations, and trace/backup exclusion path calculation.
+#
+# REQUIRED KEY: GIT_REMOTE_NAME
+#   Practical type: Git remote-name string or empty string.
+#   Examples:
+#     origin
+#     upstream
+#   Value rules by history mode:
+#     HANDOVER_HISTORY_MODE=git-remote
+#       Must be nonempty and must identify an existing remote.
+#
+#     HANDOVER_HISTORY_MODE=git-local
+#       May be empty because no remote is used.
+#
+#     HANDOVER_HISTORY_MODE=timestamped-backups
+#       May be empty because Git is not used.
+#   Used by:
+#     Fetch and push URL lookup, optional URL correction, ls-remote, fetch, push,
+#     remote-tracking branch verification, and remote URL restoration on failure.
+#
+# REQUIRED KEY: GIT_REMOTE_URL
+#   Practical type: Git transport URL or empty string.
+#   Examples by authentication method:
+#     SSH agent or externally managed SSH key:
+#       git@host.example:owner/repository.git
+#
+#     HTTPS credential helper:
+#       https://host.example/owner/repository.git
+#   Value rules by history mode:
+#     HANDOVER_HISTORY_MODE=git-remote
+#       Must be nonempty. The updater makes both the fetch and push URLs for
+#       GIT_REMOTE_NAME equal to this value after preserving their prior values.
+#
+#     HANDOVER_HISTORY_MODE=git-local
+#       May be empty.
+#
+#     HANDOVER_HISTORY_MODE=timestamped-backups
+#       May be empty.
+#   Constraints:
+#     Must be compatible with GIT_AUTH_METHOD and the credentials managed outside
+#     this file. Never embed a username/password pair, access token, or private key.
+#   Used by:
+#     Remote URL validation and correction, remote reachability validation, fetch,
+#     push, and failure restoration.
+#
+# REQUIRED KEY: GIT_BRANCH
+#   Practical type: Git branch-name string or empty string.
+#   Examples:
+#     main
+#     master
+#     release
+#   Value rules by history mode:
+#     HANDOVER_HISTORY_MODE=git-local
+#       Must be nonempty and must match the active local branch.
+#
+#     HANDOVER_HISTORY_MODE=git-remote
+#       Must be nonempty, must match the active local branch, and must exist on the
+#       configured remote.
+#
+#     HANDOVER_HISTORY_MODE=timestamped-backups
+#       May be empty.
+#   Used by:
+#     Active-branch validation, remote reference selection, divergence checks,
+#     fetch, push, and exact remote commit verification.
+#
+# REQUIRED KEY: GIT_PUSH_AFTER_ACCEPTED_UPDATE
+#   Practical type: Boolean enumeration represented as lowercase text.
+#   Supported values:
+#     true
+#       In git-remote mode, push the created local commit to the configured remote
+#       branch, fetch again, and verify the exact remote commit.
+#
+#     false
+#       Do not push after the local accepted update. In git-local and
+#       timestamped-backups modes this value has no practical push effect, but the
+#       key is still required and must contain true or false.
+#   Constraints:
+#     Must be exactly true or false in lowercase.
+#   Used by:
+#     Remote push and verification decision.
+#
+# REQUIRED KEY: GIT_AUTH_METHOD
+#   Practical type: enumeration describing authentication supplied outside the
+#   policy file.
+#   Supported values:
+#     ssh-agent
+#       Requires SSH_AUTH_SOCK to identify a live Unix socket and requires
+#       ssh-add -l to report at least one usable identity. Use an SSH remote URL.
+#
+#     ssh-key-file
+#       Requires the GIT_SSH_COMMAND environment variable to be nonempty and to
+#       identify the externally managed SSH command/key configuration. The policy
+#       does not store the key path or any key material. Use an SSH remote URL.
+#
+#     https-credential-helper
+#       Requires the configured Git repository to have a nonempty credential.helper
+#       setting. Use an HTTPS remote URL. The helper, not this file, stores or
+#       retrieves credentials.
+#
+#     none
+#       Performs no authentication precheck. This is suitable for Git-local,
+#       timestamped-backups, public read-only remote access, or an environment
+#       where authentication is provided transparently by another mechanism.
+#   Constraints:
+#     Must be one of the four supported values above.
+#     The selected method must be compatible with GIT_REMOTE_URL when remote
+#     operations are required.
+#   Used by:
+#     Conditional dependency resolution and authentication validation before
+#     remote access.
+#
+# REQUIRED KEY: REMOTE_PUSH_FAILURE_MODE
+#   Practical type: enumeration controlling behavior when a remote push fails
+#   after the accepted local commit has been created.
+#   Supported values:
+#     preserve-local-mark-remote-unresolved
+#       Preserve the local commit, report REMOTE_SYNC_UNRESOLVED with the commit
+#       identifier, and exit with status 2 without claiming remote persistence.
+#
+#     fail-keep-local
+#       Preserve the local commit and exit with status 2 after push failure. The
+#       current updater's operational result is equivalent to the value above;
+#       the distinct name allows policy intent to be recorded explicitly.
+#   Constraints:
+#     Must be one of the two supported values above even when the selected history
+#     mode does not perform remote pushes.
+#   Used by:
+#     Remote-push failure handling.
+#
+# COMPLETE SUPPORTED CONFIGURATION MATRIX:
+#   timestamped-backups:
+#     HANDOVER_HISTORY_DIR must be set.
+#     Git repository, remote, URL, and branch values may be empty.
+#     GIT_PUSH_AFTER_ACCEPTED_UPDATE must still be true or false.
+#     GIT_AUTH_METHOD may be none or another supported value, but no Git remote
+#     authentication is used by this history mode.
+#
+#   git-local:
+#     GIT_REPOSITORY_PATH and GIT_BRANCH must be set.
+#     GIT_REMOTE_NAME and GIT_REMOTE_URL may be empty.
+#     HANDOVER_HISTORY_DIR may be empty.
+#     GIT_PUSH_AFTER_ACCEPTED_UPDATE must still be true or false but no remote push
+#     is performed because the history mode is local.
+#     GIT_AUTH_METHOD may be none because no remote access is required.
+#
+#   git-remote:
+#     GIT_REPOSITORY_PATH, GIT_REMOTE_NAME, GIT_REMOTE_URL, and GIT_BRANCH must all
+#     be set.
+#     HANDOVER_HISTORY_DIR may be empty.
+#     GIT_PUSH_AFTER_ACCEPTED_UPDATE controls whether the new local commit is
+#     pushed and verified after acceptance.
+#     GIT_AUTH_METHOD must describe a working authentication arrangement or none
+#     when the environment supplies access without a supported precheck.
+#
+# CANDIDATE HANDOVER REQUIREMENTS CONTROLLED BY THIS POLICY:
+#   The candidate must be a nonempty readable file.
+#   The candidate must contain the exact path to this handover-policy.env file.
+#   The candidate must instruct subsequent work to read handover-policy.env.
+#   The canonical handover extension must agree with HANDOVER_FORMAT.
+#   If a canonical handover already exists, the candidate's normalized text size
+#   must be at least 85 percent of the existing handover's normalized text size.
+#   If labelled concepts are present in the existing handover, the candidate must
+#   retain at least 90 percent of concepts labelled SECTION, SUBSECTION, ITEM-ID,
+#   STATUS, or NEXT-ACTION.
+#
+# GENERATED OUTPUTS AND SIDE EFFECTS:
+#   The accepted handover is atomically installed at HANDOVER_CANONICAL_PATH.
+#   Pre-installation backups contain the prior handover, when present, and this
+#   policy file.
+#   The updater writes handover-update.trace in the policy directory.
+#   Git modes create a local commit containing accepted project-scope changes,
+#   excluding the candidate transport file, trace, and backup directory.
+#   git-remote may change the configured remote's fetch and push URLs to
+#   GIT_REMOTE_URL after preserving the prior values for failure restoration.
+#   git-remote may push and then verify the exact remote commit.
+#
+# EXAMPLE: TIMESTAMPED BACKUPS
+#   HANDOVER_POLICY_VERSION=1
+#   HANDOVER_HISTORY_MODE=timestamped-backups
+#   HANDOVER_CANONICAL_PATH=/absolute/project/PROJECT-HANDOVER.txt
+#   HANDOVER_FORMAT=plain-text
+#   HANDOVER_HISTORY_DIR=/absolute/project-history
+#   HANDOVER_AUTHORITY_MODE=explicit-user-acceptance
+#   GIT_REPOSITORY_PATH=
+#   GIT_REMOTE_NAME=
+#   GIT_REMOTE_URL=
+#   GIT_BRANCH=
+#   GIT_PUSH_AFTER_ACCEPTED_UPDATE=false
+#   GIT_AUTH_METHOD=none
+#   REMOTE_PUSH_FAILURE_MODE=preserve-local-mark-remote-unresolved
+#
+# EXAMPLE: LOCAL GIT HISTORY
+#   HANDOVER_POLICY_VERSION=1
+#   HANDOVER_HISTORY_MODE=git-local
+#   HANDOVER_CANONICAL_PATH=/absolute/repository/project/PROJECT-HANDOVER.txt
+#   HANDOVER_FORMAT=plain-text
+#   HANDOVER_HISTORY_DIR=
+#   HANDOVER_AUTHORITY_MODE=successful-documentation-validation
+#   GIT_REPOSITORY_PATH=/absolute/repository
+#   GIT_REMOTE_NAME=
+#   GIT_REMOTE_URL=
+#   GIT_BRANCH=main
+#   GIT_PUSH_AFTER_ACCEPTED_UPDATE=false
+#   GIT_AUTH_METHOD=none
+#   REMOTE_PUSH_FAILURE_MODE=fail-keep-local
+#
+# EXAMPLE: REMOTE GIT HISTORY USING SSH AGENT
+#   HANDOVER_POLICY_VERSION=1
+#   HANDOVER_HISTORY_MODE=git-remote
+#   HANDOVER_CANONICAL_PATH=/absolute/repository/project/PROJECT-HANDOVER.txt
+#   HANDOVER_FORMAT=plain-text
+#   HANDOVER_HISTORY_DIR=
+#   HANDOVER_AUTHORITY_MODE=explicit-user-acceptance
+#   GIT_REPOSITORY_PATH=/absolute/repository
+#   GIT_REMOTE_NAME=origin
+#   GIT_REMOTE_URL=git@host.example:owner/repository.git
+#   GIT_BRANCH=main
+#   GIT_PUSH_AFTER_ACCEPTED_UPDATE=true
+#   GIT_AUTH_METHOD=ssh-agent
+#   REMOTE_PUSH_FAILURE_MODE=preserve-local-mark-remote-unresolved
+#
+# EXAMPLE: REMOTE GIT HISTORY USING HTTPS CREDENTIAL HELPER
+#   HANDOVER_POLICY_VERSION=1
+#   HANDOVER_HISTORY_MODE=git-remote
+#   HANDOVER_CANONICAL_PATH=/absolute/repository/project/PROJECT-HANDOVER.md
+#   HANDOVER_FORMAT=markdown
+#   HANDOVER_HISTORY_DIR=
+#   HANDOVER_AUTHORITY_MODE=successful-deployment
+#   GIT_REPOSITORY_PATH=/absolute/repository
+#   GIT_REMOTE_NAME=origin
+#   GIT_REMOTE_URL=https://host.example/owner/repository.git
+#   GIT_BRANCH=main
+#   GIT_PUSH_AFTER_ACCEPTED_UPDATE=true
+#   GIT_AUTH_METHOD=https-credential-helper
+#   REMOTE_PUSH_FAILURE_MODE=fail-keep-local
+#
+# SECURITY AND OPERATIONAL NOTES:
+#   This file identifies authentication methods but must not contain credentials.
+#   ssh-key-file requires GIT_SSH_COMMAND to be supplied externally.
+#   ssh-agent requires a loaded identity in the active agent.
+#   https-credential-helper requires the repository's Git credential helper to be
+#   configured outside this file.
+#   The updater never force-pushes.
+#   The updater rejects an active Git branch that differs from GIT_BRANCH.
+#   The updater rejects pre-existing staged changes.
+#   For a project subdirectory, the updater rejects modified or untracked files
+#   outside the project scope to avoid mixing unrelated repository changes.
+#   A failed remote push preserves the successful local commit and does not claim
+#   remote synchronization succeeded.
+#

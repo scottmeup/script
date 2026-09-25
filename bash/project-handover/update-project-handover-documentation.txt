@@ -1,0 +1,361 @@
+# FILE: update-project-handover.sh
+#
+# PURPOSE:
+#   Validates, installs, preserves, versions, and, when configured, remotely
+#   synchronizes a candidate project handover according to a machine-readable
+#   handover-policy.env file. The script derives project, repository, handover,
+#   backup, authority, authentication, branch, remote, and history behavior from
+#   the selected policy rather than from a specific project name or location.
+#
+# PROJECT-WIDE FLOW:
+#   1. Parse command-line arguments and resolve the policy and candidate paths.
+#   2. Resolve required executables from PATH and enable native Bash tracing.
+#   3. Read handover-policy.env as data without sourcing or executing the file.
+#   4. Validate the policy schema, supported values, paths, and project scope.
+#   5. Verify the configured authority condition has been explicitly supplied.
+#   6. Validate the candidate handover, preservation safeguards, policy-path
+#      reference, format, normalized size, and retained section concepts.
+#   7. For Git modes, validate repository identity, branch, worktree state,
+#      project scope, authentication, remote configuration, and divergence.
+#   8. Back up the current canonical handover and handover-policy.env.
+#   9. Install the accepted candidate atomically and verify its SHA-256 digest.
+#  10. Apply the configured history mode: timestamped backup, local Git commit,
+#      or local Git commit followed by remote push and exact commit verification.
+#  11. Preserve the trace, report resulting paths and commits, and restore the
+#      prior handover or remote URLs when a pre-commit operation fails.
+#
+# DIRECT INPUTS:
+#   --policy PATH
+#     Type: readable filesystem path to handover-policy.env.
+#     Constraints: required except during --self-test; must be a regular readable
+#     file using KEY=VALUE records with supported keys and values.
+#     Used by: argument parsing, load_policy, validate_policy, validate_candidate,
+#     history selection, Git validation, backup, installation, and reporting.
+#
+#   --candidate PATH
+#     Type: readable filesystem path to the proposed handover document.
+#     Constraints: required except during --self-test; must be nonempty; extension
+#     must agree with HANDOVER_FORMAT through HANDOVER_CANONICAL_PATH; must name
+#     the exact policy path and instruct subsequent work to read that policy.
+#     Used by: validate_candidate, install_candidate, and commit_project.
+#
+#   --message TEXT
+#     Type: nonempty Git commit-message string.
+#     Constraints: required by the current command interface, including backup
+#     mode, although only Git history modes consume it when creating a commit.
+#     Used by: commit_project.
+#
+#   --accept
+#     Type: Boolean authority flag.
+#     Constraints: required when HANDOVER_AUTHORITY_MODE is
+#     explicit-user-acceptance.
+#     Used by: validate_authority.
+#
+#   --documentation-validated
+#     Type: Boolean authority flag.
+#     Constraints: required when HANDOVER_AUTHORITY_MODE is
+#     successful-documentation-validation.
+#     Used by: validate_authority.
+#
+#   --deployment-succeeded
+#     Type: Boolean authority flag.
+#     Constraints: required when HANDOVER_AUTHORITY_MODE is successful-deployment.
+#     Used by: validate_authority.
+#
+#   --self-test
+#     Type: Boolean execution-mode flag.
+#     Constraints: mutually practical with normal update operation; runs local
+#     candidate-preservation positive and negative controls without a real policy.
+#     Used by: main top-level flow and self_test.
+#
+#   Environment variable SSH_AUTH_SOCK
+#     Type: Unix-domain socket path managed outside this script.
+#     Constraints: required and must reference a socket when GIT_AUTH_METHOD is
+#     ssh-agent.
+#     Used by: validate_authentication.
+#
+#   Environment variable GIT_SSH_COMMAND
+#     Type: Git SSH command string managed outside this script.
+#     Constraints: required when GIT_AUTH_METHOD is ssh-key-file; must identify
+#     the externally managed SSH key without storing the secret in the policy.
+#     Used by: validate_authentication and Git subprocesses.
+#
+# POLICY FILE INPUT:
+#   Format: line-oriented KEY=VALUE text. Blank lines and lines beginning with #
+#   are ignored. Values are assigned as strings and are not evaluated as shell.
+#
+#   HANDOVER_POLICY_VERSION
+#     Type: schema-version string. Supported value: 1.
+#     Used by: validate_policy.
+#
+#   HANDOVER_HISTORY_MODE
+#     Type: enumeration.
+#     Supported values: git-local, git-remote, timestamped-backups.
+#     Used by: validate_policy, create_backup, and top-level history dispatch.
+#
+#   HANDOVER_CANONICAL_PATH
+#     Type: absolute or resolvable path to the canonical handover.
+#     Constraints: must be inside the policy directory and use the extension
+#     required by HANDOVER_FORMAT.
+#     Used by: validation, backup, installation, rollback, and reporting.
+#
+#   HANDOVER_FORMAT
+#     Type: enumeration. Supported values: plain-text, markdown.
+#     Constraints: plain-text requires .txt; markdown requires .md.
+#     Used by: validate_candidate.
+#
+#   HANDOVER_HISTORY_DIR
+#     Type: directory path or empty string.
+#     Constraints: required for timestamped-backups; normally empty for Git modes.
+#     Used by: validate_policy and create_backup.
+#
+#   HANDOVER_AUTHORITY_MODE
+#     Type: enumeration.
+#     Supported values: explicit-user-acceptance,
+#     successful-documentation-validation, successful-deployment.
+#     Used by: validate_authority.
+#
+#   GIT_REPOSITORY_PATH
+#     Type: repository-root path or empty string.
+#     Constraints: required for Git history modes; policy directory must be the
+#     repository root or a descendant of it.
+#     Used by: validate_policy and all Git operations.
+#
+#   GIT_REMOTE_NAME
+#     Type: Git remote-name string.
+#     Constraints: required for git-remote and must identify an existing remote.
+#     Used by: configure_and_validate_remote and push_and_verify.
+#
+#   GIT_REMOTE_URL
+#     Type: Git transport URL.
+#     Constraints: required for git-remote; becomes both fetch and push URL after
+#     prior values are preserved for failure rollback.
+#     Used by: configure_and_validate_remote.
+#
+#   GIT_BRANCH
+#     Type: Git branch-name string.
+#     Constraints: required for Git modes and must match the active local branch.
+#     Used by: validate_git_repository, remote fetch, divergence checks, and push.
+#
+#   GIT_PUSH_AFTER_ACCEPTED_UPDATE
+#     Type: Boolean string, true or false.
+#     Used by: push_and_verify.
+#
+#   GIT_AUTH_METHOD
+#     Type: enumeration.
+#     Supported values: ssh-agent, ssh-key-file, https-credential-helper, none.
+#     Used by: require_git_tools and validate_authentication.
+#
+#   REMOTE_PUSH_FAILURE_MODE
+#     Type: enumeration.
+#     Supported values: preserve-local-mark-remote-unresolved, fail-keep-local.
+#     Used by: push_and_verify.
+#
+# OTHER FILESYSTEM AND RUNTIME INPUTS:
+#   Existing canonical handover, when present; current policy; repository state;
+#   local and remote Git references; configured authentication facilities; PATH;
+#   project files under the policy directory; and existing staged, modified, or
+#   untracked repository files.
+#
+# OUTPUTS AND SIDE EFFECTS:
+#   HANDOVER_CANONICAL_PATH
+#     Type: installed handover file.
+#     Created by: install_candidate through an atomic temporary-file rename.
+#
+#   Backup directory
+#     Type: timestamped directory containing the prior canonical handover when
+#     present and a preserved copy of handover-policy.env.
+#     Created by: create_backup under HANDOVER_HISTORY_DIR for timestamped backup
+#     mode or under .handover-backups in the project directory for Git modes.
+#
+#   handover-update.trace
+#     Type: persistent native Bash execution trace.
+#     Created by: top-level execution before validation and appended through
+#     success or failure. The trace is excluded from Git staging.
+#
+#   Git commit
+#     Type: local Git commit containing accepted project-scope changes.
+#     Created by: commit_project for git-local and git-remote modes.
+#
+#   Remote Git update
+#     Type: pushed branch reference and associated commit objects.
+#     Created by: push_and_verify when configured for git-remote with push enabled.
+#
+#   Standard output
+#     Type: key-value result lines identifying the canonical handover, backup
+#     directory, trace file, and local commit when one was created.
+#
+#   Standard error
+#     Type: blocking validation, execution, or remote-synchronization errors.
+#     Created by: fail, push_and_verify, and shell/runtime failures.
+#
+#   Exit status
+#     Type: integer process status.
+#     Values: 0 for completed configured operation; 1 for validation or execution
+#     failure; 2 when a valid local commit is retained but remote synchronization
+#     remains unresolved; 130 for interruption where propagated by the shell.
+#
+# GLOBAL AND TOP-LEVEL VARIABLES:
+#   POLICY_PATH: selected policy-file path.
+#   CANDIDATE_PATH: proposed handover transport-file path.
+#   COMMIT_MESSAGE: requested Git commit message.
+#   ACCEPT: explicit-user-acceptance flag.
+#   DOCUMENTATION_VALIDATED: documentation-authority flag.
+#   DEPLOYMENT_SUCCEEDED: deployment-authority flag.
+#   SELF_TEST: self-test execution flag.
+#   TRACE_PATH: native Bash trace-file path derived from the policy directory.
+#   PROJECT_DIR: project directory derived from the policy-file location.
+#   PROJECT_RELATIVE: project path relative to the configured repository root.
+#   BACKUP_DIR: timestamped backup destination selected by history mode.
+#   PRIOR_FETCH_URL and PRIOR_PUSH_URL: remote URLs preserved for failure rollback.
+#   REMOTE_CHANGED: indicates remote URLs were changed during this invocation.
+#   CANONICAL_INSTALLED: indicates candidate installation occurred and may require
+#   restoration during failure finalization.
+#   PRIOR_HANDOVER_BACKUP: backup path used to restore the previous handover.
+#   COMMIT_CREATED and CREATED_COMMIT: local-commit state and identifier.
+#   Executable variables such as GIT_BIN, PYTHON_BIN, SHA256_BIN, and AWK_BIN:
+#   resolved PATH locations used consistently for validation and execution.
+#   Policy variables: populated by load_policy from handover-policy.env and used
+#   according to the per-key descriptions above.
+#
+# FUNCTIONS:
+#   usage
+#     Purpose: print supported invocation forms.
+#     Inputs: script name through $0.
+#     Outputs: usage text on standard output.
+#     Side effects: none.
+#
+#   fail
+#     Purpose: terminate on a blocking error.
+#     Inputs: error-message arguments.
+#     Outputs: prefixed error text on standard error and exit status 1.
+#     Side effects: invokes EXIT finalization through shell exit handling.
+#
+#   command_path
+#     Purpose: resolve and validate an executable through PATH.
+#     Inputs: executable name.
+#     Outputs: resolved executable path.
+#     Side effects: fails if the executable is missing or not executable.
+#
+#   require_git_tools
+#     Purpose: resolve tools needed by Git modes and conditionally resolve
+#     ssh-add for ssh-agent authentication.
+#     Inputs: GIT_AUTH_METHOD and PATH.
+#     Outputs: populated executable-path globals.
+#     Side effects: fails before Git work if a required executable is unavailable.
+#
+#   normalize_size
+#     Purpose: calculate normalized handover text length for preservation checks.
+#     Inputs: handover path.
+#     Outputs: normalized character count.
+#     Side effects: invokes Python; does not modify the input.
+#
+#   section_concepts
+#     Purpose: extract stable labelled section concepts from a handover.
+#     Inputs: handover path.
+#     Outputs: one normalized concept per line.
+#     Side effects: invokes Python; does not modify the input.
+#
+#   validate_candidate
+#     Purpose: validate readability, format, policy reference, policy-reading
+#     instruction, normalized-size safeguard, and section-concept preservation.
+#     Inputs: candidate, policy, canonical handover, and format globals.
+#     Outputs: no direct output on success.
+#     Side effects: blocks installation on any failed condition.
+#
+#   validate_authority
+#     Purpose: enforce the authority condition selected by policy.
+#     Inputs: HANDOVER_AUTHORITY_MODE and command-line authority flags.
+#     Outputs: none on success.
+#     Side effects: blocks installation when the required authority flag is absent.
+#
+#   validate_policy
+#     Purpose: validate required policy keys, supported values, path containment,
+#     history requirements, and repository-project relationships.
+#     Inputs: loaded policy globals and POLICY_PATH.
+#     Outputs: PROJECT_DIR and PROJECT_RELATIVE when applicable.
+#     Side effects: blocks execution on malformed, unsupported, or conflicting data.
+#
+#   load_policy
+#     Purpose: parse KEY=VALUE policy records without evaluating shell syntax.
+#     Inputs: POLICY_PATH.
+#     Outputs: exported policy variables.
+#     Side effects: rejects malformed or duplicate keys.
+#
+#   validate_git_repository
+#     Purpose: validate worktree identity, repository root, active branch, empty
+#     staging area, and absence of unrelated changes outside a project subfolder.
+#     Inputs: repository and branch policy values plus repository state.
+#     Outputs: none on success.
+#     Side effects: invokes read-only Git inspections and blocks unsafe commits.
+#
+#   validate_authentication
+#     Purpose: validate the configured authentication facility without storing
+#     authentication secrets in the policy.
+#     Inputs: GIT_AUTH_METHOD, SSH_AUTH_SOCK, GIT_SSH_COMMAND, and Git config.
+#     Outputs: none on success.
+#     Side effects: queries the SSH agent or Git credential-helper configuration.
+#
+#   configure_and_validate_remote
+#     Purpose: preserve and, when needed, set fetch and push URLs, validate remote
+#     access and branch existence, fetch remote state, and reject divergence.
+#     Inputs: remote, URL, branch, authentication, and repository policy values.
+#     Outputs: prior remote URLs and validated local/remote references.
+#     Side effects: may modify remote URLs and fetch remote objects and references.
+#
+#   create_backup
+#     Purpose: preserve the accepted handover and policy before replacement.
+#     Inputs: history mode, history directory, canonical path, policy path, time.
+#     Outputs: backup directory and prior-handover backup path.
+#     Side effects: creates directories and file copies.
+#
+#   install_candidate
+#     Purpose: atomically install the accepted candidate and verify exact bytes.
+#     Inputs: candidate and canonical paths.
+#     Outputs: installed canonical handover and installation-state globals.
+#     Side effects: replaces the canonical handover only after backup and then
+#     compares candidate and installed SHA-256 digests.
+#
+#   commit_project
+#     Purpose: stage only derived project-scope changes, excluding the candidate
+#     transport, trace, and backups, then create a local commit.
+#     Inputs: repository, project scope, candidate, trace, backup, and message.
+#     Outputs: CREATED_COMMIT and COMMIT_CREATED.
+#     Side effects: modifies the Git index and creates a commit.
+#
+#   push_and_verify
+#     Purpose: push the accepted commit when configured, retain local success on
+#     push failure, fetch again, and verify the exact remote commit.
+#     Inputs: push policy, remote, branch, failure mode, and created commit.
+#     Outputs: remote synchronization status through result or exit status 2.
+#     Side effects: updates the remote branch and local remote-tracking reference.
+#
+#   finish
+#     Purpose: preserve the real exit status and perform failure restoration.
+#     Inputs: global installation, backup, and remote-change state.
+#     Outputs: original completion status.
+#     Side effects: restores the prior handover or remote URLs where applicable.
+#
+#   self_test
+#     Purpose: exercise candidate-preservation positive and truncated negative
+#     controls using temporary files.
+#     Inputs: locally generated temporary policy references and handovers.
+#     Outputs: SELF_TEST=PASS on success.
+#     Side effects: creates and removes temporary test files.
+#
+# CROSS-FILE DEPENDENCIES:
+#   handover-policy.env provides all supported operational policy values.
+#   The candidate handover supplies the proposed complete project continuity state.
+#   The canonical handover is the accepted persistent project continuity record.
+#   The configured Git repository supplies history and, in git-remote mode, remote
+#   persistence. No project-specific application code is imported or executed.
+#
+# FAILURE, RESTORATION, AND ROLLBACK:
+#   Candidate or policy validation fails before installation whenever possible.
+#   If candidate installation occurs and a later step fails before accepted
+#   completion, finish restores the prior canonical handover or removes a newly
+#   created canonical file. If remote URLs were changed and a later pre-success
+#   step fails, finish restores the prior fetch and push URLs. A failed remote
+#   push preserves the successful local commit and exits with status 2 in the
+#   supported push-failure modes. The script never force-pushes.
+#

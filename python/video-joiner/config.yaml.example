@@ -4,7 +4,7 @@ paths:
 
 dry_run: true
 
-output_dir: /mnt/sdc1/temp/joined_cycle_videos
+output_dir: /videos/output
 
 filesystem_time:
   field: ctime
@@ -61,8 +61,12 @@ encoding:
         - libaom-av1
 
 sync:
-  mode: offset
-  sync_points: []
+  mode: sync_points
+  sync_points:
+    - reference_camera: Front
+      reference_time: 2026-05-16T10:00:00
+      target_camera: Rear
+      target_time: 2026-05-16T09:00:05
 
 audio:
   mode: mix
@@ -81,11 +85,11 @@ audio:
 
 dry_run_output:
   format: text
-  file: /mnt/sdc1/temp/joined_cycle_videos/dry-run-report.json
+  file: /videos/output/dry-run-report.json
 
 sources:
   - name: Front
-    path: /mnt/sdc1/cycle_videos/front
+    path: /videos/front
     extensions:
       - MP4
     datetime_format: YYYY_MMDD_HHMMSS_nnn
@@ -102,7 +106,7 @@ sources:
         mode: match_first
 
   - name: Rear
-    path: /mnt/sdc1/cycle_videos/rear
+    path: /videos/rear
     extensions:
       - MP4
     datetime_format: YYYY_MMDD_HHMMSS_nnn

@@ -13,3 +13,4 @@ python/connectivity-watchdog/mqtt_brokers.conf
 /python/jellyfin-delete-sync/.idea
 /.idea
 /bash/z-deprecated
+python/handover-updater/handover-policy.env

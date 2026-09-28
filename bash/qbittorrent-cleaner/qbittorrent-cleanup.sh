@@ -166,6 +166,7 @@ filter_array() {
     local -n input_ref=$1
     local -n exclusions_ref=$2
     local -n output_ref=$3
+    local EXCLUDE_DESCENDANTS="${4:-false}"
     local path 
     local excluded_path 
     local is_excluded
@@ -179,7 +180,7 @@ filter_array() {
             is_excluded=false
             if [[ -n "${exclusions_ref[$path]+x}" ]]; then
                 is_excluded=true
-            else
+            elif [[ "$EXCLUDE_DESCENDANTS" == "true" ]]; then
                 for excluded_path in "${!exclusions_ref[@]}"; do
                     if [[ "$path" == "$excluded_path"/* ]]; then
                         is_excluded=true
@@ -194,7 +195,7 @@ filter_array() {
             is_excluded=false
             if [[ -n "${exclusions_ref[$path]+x}" ]]; then
                 is_excluded=true
-            else
+            elif [[ "$EXCLUDE_DESCENDANTS" == "true" ]]; then
                 for excluded_path in "${!exclusions_ref[@]}"; do
                     if [[ "$path" == "$excluded_path"/* ]]; then
                         is_excluded=true
@@ -374,9 +375,9 @@ echo "Scanned filesystem: ${#FILE_SYSTEM_ALL_FILES[@]} files, ${#FILE_SYSTEM_ALL
 sort_directories_deepest_first
 
 # Filter unmanaged files and directories
-filter_array FILE_SYSTEM_ALL_FILES QBIT_MANAGED_FILES UNMANAGED_FILES
-filter_array FILE_SYSTEM_ALL_DIRECTORIES QBIT_MANAGED_FILES UNMANAGED_DIRECTORIES
-filter_array UNMANAGED_DIRECTORIES QBIT_SAVE_PATHS UNMANAGED_DIRECTORIES_MINUS_BASE_SAVE_PATHS
+filter_array FILE_SYSTEM_ALL_FILES QBIT_MANAGED_FILES UNMANAGED_FILES true
+filter_array FILE_SYSTEM_ALL_DIRECTORIES QBIT_MANAGED_FILES UNMANAGED_DIRECTORIES true
+filter_array UNMANAGED_DIRECTORIES QBIT_SAVE_PATHS UNMANAGED_DIRECTORIES_MINUS_BASE_SAVE_PATHS false
 
 # Output cleanup results
 {

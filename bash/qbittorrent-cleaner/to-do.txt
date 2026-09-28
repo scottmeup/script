@@ -4,3 +4,4 @@ Bug:
 --- Possibly these are sub directories of managed directories
 --- Possibly minimum age check isn't being done on directories
 -- Category root directories are being included in the removal list
+--- Need to implement exclusions list

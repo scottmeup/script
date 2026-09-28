@@ -143,7 +143,7 @@ scan_filesystem() {
 
         while IFS= read -r subdir; do
             FILE_SYSTEM_ALL_DIRECTORIES["$subdir"]=1
-        done < <(find "$dir" -type d 2>/dev/null)
+        done < <(find "$dir" -type d -mmin +"$OUTPUT_MINIMUM_AGE_MINUTES" 2>/dev/null)
     done
 }
 

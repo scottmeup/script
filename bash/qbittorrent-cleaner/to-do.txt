@@ -1,0 +1,5 @@
+Bug: 
+- Directories not enumerating properly
+-- Still managed directories are being included in the removal list
+--- Possibly these are sub directories of managed directories?
+-- Category root directories are being included in the removal list

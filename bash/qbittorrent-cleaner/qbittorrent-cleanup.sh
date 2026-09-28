@@ -166,17 +166,43 @@ filter_array() {
     local -n input_ref=$1
     local -n exclusions_ref=$2
     local -n output_ref=$3
+    local path 
+    local excluded_path 
+    local is_excluded
+
 
     output_ref=()
 
     # Detect if input is associative (-A) or indexed
     if declare -p "$1" 2>/dev/null | grep -q 'declare -A'; then
         for path in "${!input_ref[@]}"; do
-            [[ -z "${exclusions_ref[$path]}" ]] && output_ref+=("$path")
+            is_excluded=false
+            if [[ -n "${exclusions_ref[$path]+x}" ]]; then
+                is_excluded=true
+            else
+                for excluded_path in "${!exclusions_ref[@]}"; do
+                    if [[ "$path" == "$excluded_path"/* ]]; then
+                        is_excluded=true
+                        break
+                    fi
+                done
+            fi
+            [[ "$is_excluded" == "false" ]] && output_ref+=("$path")
         done
     else
         for path in "${input_ref[@]}"; do
-            [[ -z "${exclusions_ref[$path]}" ]] && output_ref+=("$path")
+            is_excluded=false
+            if [[ -n "${exclusions_ref[$path]+x}" ]]; then
+                is_excluded=true
+            else
+                for excluded_path in "${!exclusions_ref[@]}"; do
+                    if [[ "$path" == "$excluded_path"/* ]]; then
+                        is_excluded=true
+                        break
+                    fi
+                done
+            fi
+            [[ "$is_excluded" == "false" ]] && output_ref+=("$path")
         done
     fi
 }

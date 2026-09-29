@@ -22,8 +22,10 @@ try() { "$@" || die "Failed: $*"; }
 
 ### Global associative and indexed arrays
 declare -A QBIT_MANAGED_FILES=()             # All files currently in use by qBittorrent
-declare -A QBIT_SAVE_PATHS=()                     # Base save path for each category with a torrent that was retrieved
+declare -A QBIT_MANAGED_DIRECTORIES=()       # Directories containing managed files, up to each save path
+declare -A QBIT_SAVE_PATHS=()                # Base save path for each category with a torrent that was retrieved
 declare -A FILE_SYSTEM_ALL_FILES=()          # Recursive listing for all files inside all QBIT_SAVE_PATHS
+declare -A QBIT_CONTENT_PATHS=()             # Torrent content_path values
 declare -A FILE_SYSTEM_ALL_DIRECTORIES=()    
 declare -a FILE_SYSTEM_ALL_DIRECTORIES_SORTED_LARGEST_DESCENDING=()
 declare -a QBIT_SAVE_PATHS_PRUNED=()
@@ -77,6 +79,7 @@ get_qbittorrent_files() {
         content_path=$(jq -r '.content_path // empty' <<<"$torrent" | sed 's|/$||')
 
         [[ -n "$save_path" ]] && QBIT_SAVE_PATHS["$save_path"]=1
+        [[ -n "$content_path" ]] && QBIT_CONTENT_PATHS["$content_path"]=1
 
         local files_json
         files_json=$(curl -s --cookie "$COOKIE_FILE" "${URL%/}/api/v2/torrents/files?hash=$hash" || echo "[]")
@@ -84,29 +87,23 @@ get_qbittorrent_files() {
         local file_count
         file_count=$(jq 'length' <<<"$files_json")
 
-        if (( file_count == 0 )); then
-            continue
-        elif (( file_count == 1 )); then
-            # Single-file torrent
-            local name
-            name=$(jq -r '.[0].name' <<<"$files_json")
-            if [[ -n "$content_path" && "$content_path" != "null" ]]; then
-                QBIT_MANAGED_FILES["$content_path"]=1
-            elif [[ -n "$name" && -n "$save_path" ]]; then
-                local full_path="${save_path}/${name#/}"
-                QBIT_MANAGED_FILES["${full_path//\/\//\/}"]=1
-            fi
-        else
-            if [[ -n "$content_path" && "$content_path" != "null" ]]; then
-                QBIT_MANAGED_FILES["$content_path"]=1
-            fi
-            # Multi-file torrent
-            while IFS= read -r rel_path; do
-                [[ -z "$rel_path" ]] && continue
-                local full_path="${save_path}/${rel_path#/}"
-                QBIT_MANAGED_FILES["${full_path//\/\//\/}"]=1
-            done < <(jq -r '.[].name' <<<"$files_json")
-        fi
+        local files_json
+        files_json=$(curl -s --cookie "$COOKIE_FILE" "${URL%/}/api/v2/torrents/files?hash=$hash" || echo "[]")
+
+        while IFS= read -r rel_path; do
+            [[ -z "$rel_path" || -z "$save_path" ]] && continue
+
+            local full_path parent_path
+            full_path="${save_path}/${rel_path#/}"
+            full_path="${full_path//\/\//\/}"
+            QBIT_MANAGED_FILES["$full_path"]=1
+
+            parent_path="${full_path%/*}"
+            while [[ -n "$parent_path" && "$parent_path" != "$save_path" && "$parent_path" == "$save_path"/* ]]; do
+                QBIT_PROTECTED_DIRECTORIES["$parent_path"]=1
+                parent_path="${parent_path%/*}"
+            done
+        done < <(jq -r '.[].name // empty' <<<"$files_json")
     done < <(jq -c '.[]' <<<"$TORRENTS_JSON")
 }
 

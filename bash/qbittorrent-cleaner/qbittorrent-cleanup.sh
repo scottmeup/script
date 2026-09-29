@@ -166,44 +166,17 @@ filter_array() {
     local -n input_ref=$1
     local -n exclusions_ref=$2
     local -n output_ref=$3
-    local EXCLUDE_DESCENDANTS="${4:-false}"
-    local path 
-    local excluded_path 
-    local is_excluded
-
 
     output_ref=()
 
     # Detect if input is associative (-A) or indexed
     if declare -p "$1" 2>/dev/null | grep -q 'declare -A'; then
         for path in "${!input_ref[@]}"; do
-            is_excluded=false
-            if [[ -n "${exclusions_ref[$path]+x}" ]]; then
-                is_excluded=true
-            elif [[ "$EXCLUDE_DESCENDANTS" == "true" ]]; then
-                for excluded_path in "${!exclusions_ref[@]}"; do
-                    if [[ "$path" == "$excluded_path"/* ]]; then
-                        is_excluded=true
-                        break
-                    fi
-                done
-            fi
-            [[ "$is_excluded" == "false" ]] && output_ref+=("$path")
+            [[ -z "${exclusions_ref[$path]}" ]] && output_ref+=("$path")
         done
     else
         for path in "${input_ref[@]}"; do
-            is_excluded=false
-            if [[ -n "${exclusions_ref[$path]+x}" ]]; then
-                is_excluded=true
-            elif [[ "$EXCLUDE_DESCENDANTS" == "true" ]]; then
-                for excluded_path in "${!exclusions_ref[@]}"; do
-                    if [[ "$path" == "$excluded_path"/* ]]; then
-                        is_excluded=true
-                        break
-                    fi
-                done
-            fi
-            [[ "$is_excluded" == "false" ]] && output_ref+=("$path")
+            [[ -z "${exclusions_ref[$path]}" ]] && output_ref+=("$path")
         done
     fi
 }
@@ -375,9 +348,9 @@ echo "Scanned filesystem: ${#FILE_SYSTEM_ALL_FILES[@]} files, ${#FILE_SYSTEM_ALL
 sort_directories_deepest_first
 
 # Filter unmanaged files and directories
-filter_array FILE_SYSTEM_ALL_FILES QBIT_MANAGED_FILES UNMANAGED_FILES true
-filter_array FILE_SYSTEM_ALL_DIRECTORIES QBIT_MANAGED_FILES UNMANAGED_DIRECTORIES true
-filter_array UNMANAGED_DIRECTORIES QBIT_SAVE_PATHS UNMANAGED_DIRECTORIES_MINUS_BASE_SAVE_PATHS false
+filter_array FILE_SYSTEM_ALL_FILES QBIT_MANAGED_FILES UNMANAGED_FILES
+filter_array FILE_SYSTEM_ALL_DIRECTORIES QBIT_MANAGED_FILES UNMANAGED_DIRECTORIES
+filter_array UNMANAGED_DIRECTORIES QBIT_SAVE_PATHS UNMANAGED_DIRECTORIES_MINUS_BASE_SAVE_PATHS
 
 # Output cleanup results
 {

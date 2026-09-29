@@ -200,7 +200,12 @@ dump_all_arrays_to_files() {
     {
         for k in "${!QBIT_MANAGED_FILES[@]}";   do echo "$k"; done
     } | sort > "$out/qbittorrent-managed-files.txt"
-
+    {
+        for k in "${!QBIT_MANAGED_DIRECTORIES[@]}";   do echo "$k"; done
+    } | sort > "$out/qbittorrent-protected-directories.txt"
+    {
+        for k in "${!QBIT_CONTENT_PATHS[@]}";   do echo "$k"; done
+    } | sort > "$out/qbittorrent-content-paths.txt"
     {
         for k in "${!FILE_SYSTEM_ALL_FILES[@]}"; do echo "$k"; done
     } | sort > "$out/filesystem-all-files.txt"
@@ -215,7 +220,9 @@ dump_all_arrays_to_files() {
         echo "Pruned save paths                         : ${#QBIT_SAVE_PATHS_PRUNED[@]}"
         echo "qBittorrent save paths                    : ${#QBIT_SAVE_PATHS[@]}"
         echo "qBittorrent managed files                 : ${#QBIT_MANAGED_FILES[@]}"
-        echo "Filesystem all files (>$OUTPUT_MINIMUM_AGE_DAYS d)              : ${#FILE_SYSTEM_ALL_FILES[@]}"
+        echo "qBittorrent protected directories         : ${#QBIT_MANAGED_DIRECTORIES[@]}"
+        echo "qBittorrent content paths                 : ${#QBIT_CONTENT_PATHS[@]}"
+        echo "Filesystem all aged files                 : ${#FILE_SYSTEM_ALL_FILES[@]}"
         echo "Filesystem all directories                : ${#FILE_SYSTEM_ALL_DIRECTORIES[@]}"
         echo "Unmanaged files                           : ${#UNMANAGED_FILES[@]}"
         echo "Unmanaged directories                     : ${#UNMANAGED_DIRECTORIES[@]}"

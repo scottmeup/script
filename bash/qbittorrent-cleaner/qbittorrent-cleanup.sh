@@ -100,7 +100,7 @@ get_qbittorrent_files() {
 
             parent_path="${full_path%/*}"
             while [[ -n "$parent_path" && "$parent_path" != "$save_path" && "$parent_path" == "$save_path"/* ]]; do
-                QBIT_PROTECTED_DIRECTORIES["$parent_path"]=1
+                QBIT_MANAGED_DIRECTORIES["$parent_path"]=1
                 parent_path="${parent_path%/*}"
             done
         done < <(jq -r '.[].name // empty' <<<"$files_json")

@@ -6,7 +6,7 @@
 # qbittorrent-cleanup.sh true true = delete without confirmation
 
 
-DEBUG=false
+DEBUG=true
 
 IFS_ORIGINAL=$IFS
 
@@ -39,7 +39,6 @@ OUTPUT_DIRECTORY="/tmp"
 OUTPUT_MINIMUM_AGE_MINUTES=60
 
 try mkdir -p "$OUTPUT_DIRECTORY"
-rm $OUTPUT_DIRECTORY/deletion*.log
 
 [[ ! -f "$QB_INSTANCES_FILE" ]] && die "Missing $QB_INSTANCES_FILE"
 
@@ -353,7 +352,7 @@ sort_directories_deepest_first
 
 # Filter unmanaged files and directories
 filter_array FILE_SYSTEM_ALL_FILES QBIT_MANAGED_FILES UNMANAGED_FILES
-filter_array FILE_SYSTEM_ALL_DIRECTORIES QBIT_MANAGED_FILES UNMANAGED_DIRECTORIES
+filter_array FILE_SYSTEM_ALL_DIRECTORIES_SORTED_LARGEST_DESCENDING QBIT_MANAGED_DIRECTORIES UNMANAGED_DIRECTORIES
 filter_array UNMANAGED_DIRECTORIES QBIT_SAVE_PATHS UNMANAGED_DIRECTORIES_MINUS_BASE_SAVE_PATHS
 
 # Output cleanup results

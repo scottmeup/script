@@ -113,7 +113,7 @@ prune_save_paths() {
     # Get sorted list of save paths
     while IFS= read -r dir; do
         sorted+=("$dir")
-    done < <(printf '%s\n' "${!QBIT_SAVE_PATHS[@]}" | sort -r)
+    done < <(printf '%s\n' "${!QBIT_SAVE_PATHS[@]}" | sort )
 
     QBIT_SAVE_PATHS_PRUNED=()
     for dir in "${sorted[@]}"; do
@@ -188,13 +188,13 @@ dump_all_arrays_to_files() {
     printf '%s\n' "${UNMANAGED_FILES[@]}"     | sort > "$out/unmanaged-files.txt"
     printf '%s\n' "${UNMANAGED_DIRECTORIES[@]}"  > "$out/unmanaged-directories.txt"
     printf '%s\n' "${UNMANAGED_DIRECTORIES_MINUS_BASE_SAVE_PATHS[@]}"  > "$out/filesystem-unmanaged-directories-minus-save-paths.txt"
-    printf '%s\n' "${FILE_SYSTEM_ALL_DIRECTORIES_SORTED_LARGEST_DESCENDING[@]}"  > "$out/all-directories-sorted-deepest-first.txt"
+    printf '%s\n' "${FILE_SYSTEM_ALL_DIRECTORIES_SORTED_LARGEST_DESCENDING[@]}"  > "$out/filesystem-all-directories-sorted-deepest-first.txt"
 
 
     # Associative arrays
     {
         for k in "${!QBIT_SAVE_PATHS[@]}";            do echo "$k"; done
-    } | sort > "$out/save-paths-from-qbittorrent.txt"
+    } | sort > "$out/qbittorrent-category-save-paths.txt"
 
     {
         for k in "${!QBIT_MANAGED_FILES[@]}";   do echo "$k"; done
